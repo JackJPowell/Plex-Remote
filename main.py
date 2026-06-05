@@ -114,11 +114,22 @@ async def get_status() -> dict:
             text=True,
             timeout=20,
         )
-        return json.loads(result.stdout)
+        # Take the last non-empty line — guards against stray output from
+        # cec-client or other commands leaking to stdout before the JSON line.
+        lines = [l for l in result.stdout.splitlines() if l.strip()]
+        if not lines:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Status script produced no output. stderr: {result.stderr.strip()}",
+            )
+        return json.loads(lines[-1])
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Status script timed out")
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="Status script produced invalid JSON")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Status script produced invalid JSON: {exc}. stdout: {result.stdout!r}. stderr: {result.stderr.strip()!r}",
+        )
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
