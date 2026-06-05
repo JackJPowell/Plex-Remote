@@ -254,6 +254,14 @@ async def plex_play(
     return {"status": "ok", "playing": item.title, "type": item.type, "rating_key": item.ratingKey}
 
 
+@app.get("/plex/clients", summary="List available Plex clients")
+async def plex_clients():
+    """Returns all Plex clients currently visible to the server."""
+    plex = _plex_server()
+    clients = plex.clients()
+    return [{"name": c.title, "product": c.product, "device": c.device} for c in clients]
+
+
 @app.post("/plex/pause", summary="Pause Plex playback")
 async def plex_pause():
     plex = _plex_server()
