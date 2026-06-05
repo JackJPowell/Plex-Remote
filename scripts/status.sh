@@ -37,7 +37,7 @@ elif pgrep -x sunshine &>/dev/null; then
 fi
 
 # ── Plex HTPC ─────────────────────────────────────────────────────────────────
-if pgrep -fi "plex.htpc\|plex-htpc" &>/dev/null; then
+if ps aux | grep -i "plex-htpc" | grep -qv grep; then
     plex_htpc_running=true
 fi
 
