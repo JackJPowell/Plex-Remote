@@ -72,7 +72,7 @@ def _plex_client(plex: PlexServer):
 def _ensure_plex_htpc_running() -> None:
     """Launch Plex HTPC if it is not already running."""
     check = subprocess.run(
-        "pgrep -fi 'plex.htpc\\|plex-htpc'",
+        "ps aux | grep -i 'plex-htpc' | grep -qv grep;",
         shell=True,
         capture_output=True,
     )
