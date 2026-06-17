@@ -38,6 +38,7 @@ app = FastAPI(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _cec(command: str, timeout: int = 10) -> None:
     """Send a single cec-client command via stdin."""
     subprocess.run(
@@ -54,7 +55,9 @@ def _plex_server() -> PlexServer:
     try:
         return PlexServer(PLEX_URL, PLEX_TOKEN)
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Cannot connect to Plex server: {exc}")
+        raise HTTPException(
+            status_code=503, detail=f"Cannot connect to Plex server: {exc}"
+        )
 
 
 def _plex_client(plex: PlexServer):
@@ -72,7 +75,7 @@ def _plex_client(plex: PlexServer):
 def _ensure_plex_htpc_running() -> None:
     """Launch Plex HTPC if it is not already running."""
     check = subprocess.run(
-        "pgrep -fi 'plex.htpc\\|plex-htpc'",
+        "ps aux | grep -i 'plex-htpc' | grep -qv grep;",
         shell=True,
         capture_output=True,
     )
@@ -95,6 +98,7 @@ def _ensure_plex_htpc_running() -> None:
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
+
 
 @app.get(
     "/status",
@@ -188,6 +192,7 @@ async def overview_page() -> str:
 
 # ── TV Control ────────────────────────────────────────────────────────────────
 
+
 @app.post("/tv/power", summary="Turn TV on or off")
 async def tv_power(state: str = Query(..., pattern="^(on|off)$")):
     """
@@ -205,6 +210,7 @@ async def tv_mute():
 
 # ── Plex Playback ─────────────────────────────────────────────────────────────
 
+
 @app.post("/plex/play", summary="Start Plex playback")
 async def plex_play(
     media_id: Optional[int] = Query(
@@ -215,7 +221,7 @@ async def plex_play(
             "Show or Season → random episode. "
             "Omit → random movie from CURATED_MOVIE_IDS."
         ),
-    )
+    ),
 ):
     """
     Ensures Plex HTPC is running, then starts playback via the Plex API.
@@ -230,12 +236,16 @@ async def plex_play(
         try:
             item = plex.fetchItem(media_id)
         except Exception as exc:
-            raise HTTPException(status_code=404, detail=f"Media {media_id} not found: {exc}")
+            raise HTTPException(
+                status_code=404, detail=f"Media {media_id} not found: {exc}"
+            )
 
         if item.type in ("show", "season"):
             episodes = item.episodes()
             if not episodes:
-                raise HTTPException(status_code=404, detail="No episodes found for that item")
+                raise HTTPException(
+                    status_code=404, detail="No episodes found for that item"
+                )
             item = random.choice(episodes)
     else:
         if not CURATED_MOVIE_IDS:
@@ -247,11 +257,18 @@ async def plex_play(
         try:
             item = plex.fetchItem(rating_key)
         except Exception as exc:
-            raise HTTPException(status_code=404, detail=f"Curated item {rating_key} not found: {exc}")
+            raise HTTPException(
+                status_code=404, detail=f"Curated item {rating_key} not found: {exc}"
+            )
 
     client = _plex_client(plex)
     client.playMedia(item)
-    return {"status": "ok", "playing": item.title, "type": item.type, "rating_key": item.ratingKey}
+    return {
+        "status": "ok",
+        "playing": item.title,
+        "type": item.type,
+        "rating_key": item.ratingKey,
+    }
 
 
 @app.get("/plex/clients", summary="List available Plex clients")
@@ -259,7 +276,9 @@ async def plex_clients():
     """Returns all Plex clients currently visible to the server."""
     plex = _plex_server()
     clients = plex.clients()
-    return [{"name": c.title, "product": c.product, "device": c.device} for c in clients]
+    return [
+        {"name": c.title, "product": c.product, "device": c.device} for c in clients
+    ]
 
 
 @app.post("/plex/pause", summary="Pause Plex playback")
@@ -278,11 +297,12 @@ async def plex_resume():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+
 def main():
     import uvicorn
+
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
 
 
 if __name__ == "__main__":
     main()
-
