@@ -20,6 +20,7 @@ import {
   Power,
   RefreshCw,
   Save,
+  ScrollText,
   Settings,
   SkipForward,
   Square,
@@ -123,6 +124,7 @@ function currentRoute() {
   if (path === "/echo") return "echo";
   if (path === "/settings") return "settings";
   if (path === "/messages") return "messages";
+  if (path === "/logs") return "logs";
   return "home";
 }
 
@@ -172,6 +174,11 @@ function defaultMessageForm() {
     ends_at: dateTimeInputValue(end.toISOString()),
     enabled: true
   };
+}
+
+function localDateTimeValue(date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
 }
 
 function IconButton({ icon: Icon, label, onClick, href, disabled, active, tone = "default" }) {
@@ -845,6 +852,7 @@ function HomeView(props) {
         <nav>
           <IconButton icon={List} label="Queue" onClick={() => setQueueOpen(true)} active={playbackState.queue.length > 0} />
           <IconButton icon={MessageSquare} label="Messages" href="/messages" active={playbackState.active_messages.length > 0} />
+          <IconButton icon={ScrollText} label="Logs" href="/logs" />
           <IconButton icon={Monitor} label="Echo" href="/echo" />
           <IconButton icon={Settings} label="Settings" href="/settings" />
         </nav>
@@ -863,7 +871,6 @@ function HomeView(props) {
         </button>
       </section>
       <QueueDrawer open={queueOpen} onClose={() => setQueueOpen(false)} queue={playbackState.queue} actions={actions} pending={pending} />
-      {error && <div className="toast">{error}</div>}
     </main>
   );
 }
@@ -876,7 +883,6 @@ function EchoView(props) {
       <NowPlayingPanel nowPlaying={nowPlaying} playbackState={playbackState} actions={actions} pending={pending} compact onQueueOpen={() => setQueueOpen(true)} tvStatus={status?.tv_status} />
       <MediaBrowser movies={movies} shows={shows} actions={actions} pending={pending} nowPlaying={nowPlaying} echo />
       <QueueDrawer open={queueOpen} onClose={() => setQueueOpen(false)} queue={playbackState.queue} actions={actions} pending={pending} />
-      {error && <div className="toast echo-toast">{error}</div>}
     </main>
   );
 }
@@ -932,7 +938,6 @@ function SettingsView({ status, actions, pending, error, lastUpdated, refreshAll
         </SettingsRow>
         <p className="settings-time">{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : ""}</p>
       </section>
-      {error && <div className="toast">{error}</div>}
     </main>
   );
 }
@@ -1072,18 +1077,89 @@ function MessagesView({ error, setError, playbackState, refreshAll }) {
           </div>
         </section>
       </section>
-      {error && <div className="toast">{error}</div>}
     </main>
   );
 }
 
-function App() {
+function LogsView() {
+  const now = new Date();
+  const [filters, setFilters] = useState(() => ({
+    start: localDateTimeValue(new Date(now.getTime() - 7 * 86400000)),
+    end: localDateTimeValue(now),
+    type: ""
+  }));
+  const [data, setData] = useState({ logs: [], counts: {}, total: 0 });
+  const [loading, setLoading] = useState(false);
+
+  const loadLogs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ start: filters.start, end: filters.end });
+      if (filters.type) params.set("type", filters.type);
+      const result = await getJson(`/api/logs?${params}`);
+      setData(result);
+    } catch {
+      setData({ logs: [], counts: {}, total: 0 });
+    } finally {
+      setLoading(false);
+    }
+  }, [filters]);
+
+  useEffect(() => {
+    loadLogs();
+  }, [loadLogs]);
+
+  const types = Object.entries(data.counts || {});
+  const totalForPeriod = types.reduce((sum, [, count]) => sum + count, 0);
+
+  return (
+    <main className="app-page settings-page">
+      <header className="topbar">
+        <a className="brand" href="/"><Home size={22} />Plex Remote</a>
+        <nav>
+          <IconButton icon={RefreshCw} label="Refresh" onClick={loadLogs} disabled={loading} />
+        </nav>
+      </header>
+      <section className="logs-panel">
+        <div className="logs-heading">
+          <div><h1>Error Logs</h1><p>Persisted application and request failures</p></div>
+          <strong>{data.total} matching</strong>
+        </div>
+        <div className="log-filters">
+          <label><span>From</span><input type="datetime-local" value={filters.start} onChange={(event) => setFilters((old) => ({ ...old, start: event.target.value }))} /></label>
+          <label><span>To</span><input type="datetime-local" value={filters.end} onChange={(event) => setFilters((old) => ({ ...old, end: event.target.value }))} /></label>
+          <label><span>Type</span><select value={filters.type} onChange={(event) => setFilters((old) => ({ ...old, type: event.target.value }))}><option value="">All types</option>{types.map(([type]) => <option value={type} key={type}>{type}</option>)}</select></label>
+        </div>
+        <div className="log-counts">
+          <button type="button" className={!filters.type ? "active" : ""} onClick={() => setFilters((old) => ({ ...old, type: "" }))}>All <strong>{totalForPeriod}</strong></button>
+          {types.map(([type, count]) => <button type="button" className={filters.type === type ? "active" : ""} onClick={() => setFilters((old) => ({ ...old, type }))} key={type}>{type} <strong>{count}</strong></button>)}
+        </div>
+        <div className="log-list">
+          {loading ? <div className="empty-list">Loading</div> : data.logs.length === 0 ? <div className="empty-list">No errors found for this period</div> : data.logs.map((entry) => (
+            <article className="log-entry" key={entry.id}>
+              <div className="log-entry-head"><span className={`log-level ${entry.level}`}>{entry.level}</span><strong>{entry.type}</strong><time>{new Date(entry.created_at).toLocaleString()}</time></div>
+              <p>{entry.message}</p>
+              {(entry.method || entry.path || entry.status_code) && <code>{[entry.method, entry.path, entry.status_code].filter(Boolean).join(" · ")}</code>}
+              {entry.details && <details><summary>Details</summary><pre>{entry.details}</pre></details>}
+            </article>
+          ))}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function RemoteApp({ route }) {
   const remote = usePlexRemote();
-  const route = currentRoute();
   if (route === "echo") return <EchoView {...remote} />;
   if (route === "settings") return <SettingsView {...remote} />;
   if (route === "messages") return <MessagesView {...remote} />;
   return <HomeView {...remote} />;
+}
+
+function App() {
+  const route = currentRoute();
+  return route === "logs" ? <LogsView /> : <RemoteApp route={route} />;
 }
 
 createRoot(document.getElementById("root")).render(<App />);

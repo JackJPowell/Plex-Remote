@@ -20,6 +20,8 @@ from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -129,6 +131,12 @@ class MessageWrite(BaseModel):
     enabled: bool = True
 
 
+class ClientLogWrite(BaseModel):
+    message: str
+    path: Optional[str] = None
+    details: Optional[str] = None
+
+
 def _now_ts() -> int:
     return int(time.time())
 
@@ -184,8 +192,96 @@ def _init_state_db() -> None:
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS error_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER NOT NULL,
+                level TEXT NOT NULL,
+                log_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                path TEXT,
+                method TEXT,
+                status_code INTEGER,
+                details TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_error_logs_created_at
+                ON error_logs(created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_error_logs_type_created
+                ON error_logs(log_type, created_at DESC);
             """
         )
+
+
+def _log_type_for_path(path: str) -> str:
+    first = path.strip("/").split("/", 1)[0]
+    return first or "system"
+
+
+def _write_error_log(
+    *,
+    message: str,
+    log_type: str,
+    level: str = "error",
+    path: Optional[str] = None,
+    method: Optional[str] = None,
+    status_code: Optional[int] = None,
+    details: Optional[str] = None,
+) -> None:
+    try:
+        with _db() as conn:
+            conn.execute(
+                """
+                INSERT INTO error_logs
+                    (created_at, level, log_type, message, path, method, status_code, details)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (_now_ts(), level, log_type, message, path, method, status_code, details),
+            )
+    except Exception:
+        logger.exception("Could not persist error log")
+
+
+@app.exception_handler(HTTPException)
+async def persist_http_exception(request: Request, exc: HTTPException):
+    if exc.status_code >= 400:
+        _write_error_log(
+            message=str(exc.detail),
+            log_type=_log_type_for_path(request.url.path),
+            level="warning" if exc.status_code < 500 else "error",
+            path=request.url.path,
+            method=request.method,
+            status_code=exc.status_code,
+        )
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def persist_validation_exception(request: Request, exc: RequestValidationError):
+    _write_error_log(
+        message="Request validation failed",
+        log_type=_log_type_for_path(request.url.path),
+        level="warning",
+        path=request.url.path,
+        method=request.method,
+        status_code=422,
+        details=json.dumps(exc.errors(), default=str),
+    )
+    return await request_validation_exception_handler(request, exc)
+
+
+@app.exception_handler(Exception)
+async def persist_unhandled_exception(request: Request, exc: Exception):
+    _write_error_log(
+        message=str(exc) or exc.__class__.__name__,
+        log_type=_log_type_for_path(request.url.path),
+        path=request.url.path,
+        method=request.method,
+        status_code=500,
+        details=exc.__class__.__name__,
+    )
+    logger.exception("Unhandled request error")
+    return Response(content='{"detail":"Internal server error"}', status_code=500, media_type="application/json")
 
 
 def _queue_row(row: sqlite3.Row) -> dict:
@@ -1102,6 +1198,76 @@ async def get_status() -> dict:
         )
 
 
+@app.get("/api/logs", summary="Query persisted error logs")
+async def get_error_logs(
+    start: Optional[str] = Query(None),
+    end: Optional[str] = Query(None),
+    log_type: Optional[str] = Query(None, alias="type"),
+    limit: int = Query(200, ge=1, le=500),
+) -> dict:
+    start_ts = _parse_local_datetime(start) if start else _now_ts() - (7 * 86400)
+    end_ts = _parse_local_datetime(end) if end else _now_ts()
+    if end_ts < start_ts:
+        raise HTTPException(status_code=400, detail="End time must be after start time")
+
+    date_where = "created_at >= ? AND created_at <= ?"
+    date_params: list[object] = [start_ts, end_ts]
+    where = date_where
+    params = list(date_params)
+    if log_type:
+        where += " AND log_type = ?"
+        params.append(log_type)
+
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM error_logs WHERE {where} ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        total = conn.execute(
+            f"SELECT COUNT(*) AS count FROM error_logs WHERE {where}",
+            params,
+        ).fetchone()["count"]
+        count_rows = conn.execute(
+            f"""
+            SELECT log_type, COUNT(*) AS count
+            FROM error_logs WHERE {date_where}
+            GROUP BY log_type ORDER BY count DESC, log_type ASC
+            """,
+            date_params,
+        ).fetchall()
+
+    return {
+        "logs": [
+            {
+                "id": row["id"],
+                "created_at": datetime.fromtimestamp(row["created_at"]).isoformat(),
+                "level": row["level"],
+                "type": row["log_type"],
+                "message": row["message"],
+                "path": row["path"],
+                "method": row["method"],
+                "status_code": row["status_code"],
+                "details": row["details"],
+            }
+            for row in rows
+        ],
+        "total": total,
+        "counts": {row["log_type"]: row["count"] for row in count_rows},
+    }
+
+
+@app.post("/api/logs/client", status_code=204, summary="Persist a client-side error")
+async def create_client_error_log(entry: ClientLogWrite):
+    _write_error_log(
+        message=entry.message,
+        log_type="frontend",
+        path=entry.path,
+        method="CLIENT",
+        details=entry.details,
+    )
+    return Response(status_code=204)
+
+
 def _spa_response():
     if os.path.exists(FRONTEND_INDEX):
         return FileResponse(FRONTEND_INDEX)
@@ -1134,6 +1300,7 @@ def _spa_response():
 @app.get("/", include_in_schema=False)
 @app.get("/echo", include_in_schema=False)
 @app.get("/settings", include_in_schema=False)
+@app.get("/logs", include_in_schema=False)
 async def spa_page():
     """Serve the built React SPA."""
     return _spa_response()
