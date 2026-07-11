@@ -50,6 +50,7 @@ const EMPTY_PLAYBACK_STATE = {
 const STATUS_HOLD_MS = 18000;
 const PLAY_START_HOLD_MS = 9000;
 const COMMAND_UNLOCK_MS = 650;
+const MEDIA_BROWSER_IDLE_MS = 2 * 60 * 1000;
 const STATUS_HOLDS_KEY = "plexRemote.statusHolds";
 
 function readStoredStatusHolds() {
@@ -624,6 +625,8 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
   const [loading, setLoading] = useState(false);
   const [browserError, setBrowserError] = useState(null);
   const [choiceItem, setChoiceItem] = useState(null);
+  const idleTimer = useRef(null);
+  const navigationId = useRef(0);
   const playbackActive = Boolean(nowPlaying?.playing || nowPlaying?.state);
   const title = mode === "movies"
     ? "Movies"
@@ -632,6 +635,39 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
       : mode === "episodes"
         ? selectedSeason?.title || "Episodes"
         : "TV Shows";
+
+  const returnToTop = useCallback(() => {
+    navigationId.current += 1;
+    setMode("top");
+    setSelectedShow(null);
+    setSelectedSeason(null);
+    setSeasons([]);
+    setEpisodes([]);
+    setLoading(false);
+    setBrowserError(null);
+    setChoiceItem(null);
+  }, []);
+
+  const resetIdleTimer = useCallback(() => {
+    window.clearTimeout(idleTimer.current);
+    idleTimer.current = window.setTimeout(returnToTop, MEDIA_BROWSER_IDLE_MS);
+  }, [returnToTop]);
+
+  useEffect(() => {
+    if (mode === "top") {
+      window.clearTimeout(idleTimer.current);
+      idleTimer.current = null;
+      return undefined;
+    }
+
+    resetIdleTimer();
+    window.addEventListener("click", resetIdleTimer, true);
+    return () => {
+      window.removeEventListener("click", resetIdleTimer, true);
+      window.clearTimeout(idleTimer.current);
+      idleTimer.current = null;
+    };
+  }, [mode, resetIdleTimer]);
 
   const chooseMedia = (item) => {
     if (playbackActive) {
@@ -642,6 +678,7 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
   };
 
   const openShows = () => {
+    navigationId.current += 1;
     setSelectedShow(null);
     setSelectedSeason(null);
     setSeasons([]);
@@ -650,6 +687,9 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
   };
 
   const goBack = () => {
+    navigationId.current += 1;
+    setLoading(false);
+    setBrowserError(null);
     if (mode === "episodes") {
       setSelectedSeason(null);
       setEpisodes([]);
@@ -662,10 +702,11 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
       setMode("shows");
       return;
     }
-    setMode("top");
+    returnToTop();
   };
 
   const openSeasons = async (show) => {
+    const requestNavigationId = ++navigationId.current;
     setSelectedShow(show);
     setSelectedSeason(null);
     setEpisodes([]);
@@ -673,27 +714,32 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
     setBrowserError(null);
     try {
       const data = await getJson(`/plex/media/shows/${show.rating_key}/seasons`);
+      if (navigationId.current !== requestNavigationId) return;
       setSeasons(data);
       setMode("seasons");
     } catch (err) {
+      if (navigationId.current !== requestNavigationId) return;
       setBrowserError(err.message);
     } finally {
-      setLoading(false);
+      if (navigationId.current === requestNavigationId) setLoading(false);
     }
   };
 
   const openEpisodes = async (season) => {
+    const requestNavigationId = ++navigationId.current;
     setSelectedSeason(season);
     setLoading(true);
     setBrowserError(null);
     try {
       const data = await getJson(`/plex/media/shows/${selectedShow.rating_key}/seasons/${season.rating_key}/episodes`);
+      if (navigationId.current !== requestNavigationId) return;
       setEpisodes(data);
       setMode("episodes");
     } catch (err) {
+      if (navigationId.current !== requestNavigationId) return;
       setBrowserError(err.message);
     } finally {
-      setLoading(false);
+      if (navigationId.current === requestNavigationId) setLoading(false);
     }
   };
 
@@ -767,7 +813,7 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
   ) : (
     <section className={`browser top ${echo ? "echo" : ""}`}>
       <div className="choice-grid">
-        <button className="choice large" type="button" onClick={() => setMode("movies")}>
+        <button className="choice large" type="button" onClick={() => { navigationId.current += 1; setMode("movies"); }}>
           <Clapperboard size={24} />
           <span>Movies</span>
         </button>
