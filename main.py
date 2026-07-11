@@ -12,7 +12,9 @@ import os
 import random
 import re
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -85,6 +87,8 @@ _tv_power_last_refresh = 0.0
 _TV_POWER_REFRESH_INTERVAL = 15.0
 _automation_task: Optional[asyncio.Task] = None
 _automation_lock: Optional[asyncio.Lock] = None
+_plex_server_instance: Optional[PlexServer] = None
+_plex_server_lock = threading.Lock()
 
 # D-Bus / XDG environment required for `systemctl --user` in subprocesses.
 # Captured at startup so worker threads and async handlers can pass them.
@@ -169,8 +173,19 @@ def _db() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _db_connection():
+    """Provide a transaction and always close its SQLite file descriptors."""
+    conn = _db()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def _init_state_db() -> None:
-    with _db() as conn:
+    with _db_connection() as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS playback_queue (
@@ -234,7 +249,7 @@ def _write_error_log(
     details: Optional[str] = None,
 ) -> None:
     try:
-        with _db() as conn:
+        with _db_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO error_logs
@@ -386,7 +401,7 @@ def _timer_state(conn: Optional[sqlite3.Connection] = None) -> dict:
 
 
 def _playback_state(now_playing: Optional[dict] = None) -> dict:
-    with _db() as conn:
+    with _db_connection() as conn:
         return {
             "queue": _queue_items(conn),
             "timer": _timer_state(conn),
@@ -396,7 +411,7 @@ def _playback_state(now_playing: Optional[dict] = None) -> dict:
 
 
 def _next_queue_item() -> Optional[dict]:
-    with _db() as conn:
+    with _db_connection() as conn:
         row = conn.execute(
             "SELECT * FROM playback_queue ORDER BY position ASC, id ASC LIMIT 1"
         ).fetchone()
@@ -404,7 +419,7 @@ def _next_queue_item() -> Optional[dict]:
 
 
 def _delete_queue_item(item_id: int) -> None:
-    with _db() as conn:
+    with _db_connection() as conn:
         conn.execute("DELETE FROM playback_queue WHERE id = ?", (item_id,))
         rows = conn.execute(
             "SELECT id FROM playback_queue ORDER BY position ASC, id ASC"
@@ -430,14 +445,34 @@ def _cec(command: str, timeout: int = 10) -> None:
 
 
 def _plex_server() -> PlexServer:
+    global _plex_server_instance
     if not PLEX_TOKEN:
         raise HTTPException(status_code=503, detail="PLEX_TOKEN not configured")
-    try:
-        return PlexServer(PLEX_URL, PLEX_TOKEN, timeout=PLEX_TIMEOUT)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503, detail=f"Cannot connect to Plex server: {exc}"
-        )
+    if _plex_server_instance is None:
+        with _plex_server_lock:
+            if _plex_server_instance is None:
+                try:
+                    _plex_server_instance = PlexServer(
+                        PLEX_URL,
+                        PLEX_TOKEN,
+                        timeout=PLEX_TIMEOUT,
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Cannot connect to Plex server: {exc}",
+                    ) from exc
+    return _plex_server_instance
+
+
+def _close_plex_server() -> None:
+    """Close the cached Plex HTTP connection pool during application shutdown."""
+    global _plex_server_instance
+    with _plex_server_lock:
+        plex = _plex_server_instance
+        _plex_server_instance = None
+        if plex is not None:
+            plex._session.close()
 
 
 def _plex_client(plex: PlexServer):
@@ -1272,7 +1307,7 @@ async def get_error_logs(
         where += " AND log_type = ?"
         params.append(log_type)
 
-    with _db() as conn:
+    with _db_connection() as conn:
         rows = conn.execute(
             f"SELECT * FROM error_logs WHERE {where} ORDER BY created_at DESC, id DESC LIMIT ?",
             (*params, limit),
@@ -1376,6 +1411,7 @@ async def app_shutdown() -> None:
             await _automation_task
         except asyncio.CancelledError:
             pass
+    _close_plex_server()
 
 
 # ── Shared Playback State ────────────────────────────────────────────────────
@@ -1392,7 +1428,7 @@ async def playback_state():
 
 @app.post("/playback/timer", summary="Adjust or clear playback automation timer")
 async def playback_timer(update: TimerUpdate):
-    with _db() as conn:
+    with _db_connection() as conn:
         if update.clear:
             _set_setting(conn, "timer_expires_at", None)
         else:
@@ -1433,7 +1469,7 @@ async def playback_queue_add(item: QueueCreate):
         except Exception:
             title = title or f"Media {item.media_id}"
 
-    with _db() as conn:
+    with _db_connection() as conn:
         row = conn.execute("SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM playback_queue").fetchone()
         conn.execute(
             """
@@ -1455,7 +1491,7 @@ async def playback_queue_add(item: QueueCreate):
 
 @app.delete("/playback/queue", summary="Clear queued playback items")
 async def playback_queue_clear():
-    with _db() as conn:
+    with _db_connection() as conn:
         conn.execute("DELETE FROM playback_queue")
     return {"status": "ok", "queue": []}
 
@@ -1468,7 +1504,7 @@ async def playback_queue_delete(item_id: int):
 
 @app.post("/playback/queue/{item_id}/play-now", summary="Play one queued item now")
 async def playback_queue_play_now(item_id: int):
-    with _db() as conn:
+    with _db_connection() as conn:
         row = conn.execute(
             "SELECT * FROM playback_queue WHERE id = ?",
             (item_id,),
@@ -1487,7 +1523,7 @@ async def playback_queue_play_now(item_id: int):
 
 @app.post("/playback/queue/reorder", summary="Reorder queued playback items")
 async def playback_queue_reorder(ordering: QueueReorder):
-    with _db() as conn:
+    with _db_connection() as conn:
         rows = conn.execute("SELECT id FROM playback_queue").fetchall()
         existing = {row["id"] for row in rows}
         requested = [item_id for item_id in ordering.ids if item_id in existing]
@@ -1505,7 +1541,7 @@ async def messages_list(request: Request):
     accept = request.headers.get("accept", "")
     if "text/html" in accept and "application/json" not in accept:
         return _spa_response()
-    with _db() as conn:
+    with _db_connection() as conn:
         rows = conn.execute("SELECT * FROM messages ORDER BY starts_at DESC, id DESC").fetchall()
         return [_message_row(row) for row in rows]
 
@@ -1517,7 +1553,7 @@ async def messages_create(message: MessageWrite):
     if ends_at <= starts_at:
         raise HTTPException(status_code=400, detail="End time must be after start time")
     now = _now_ts()
-    with _db() as conn:
+    with _db_connection() as conn:
         cursor = conn.execute(
             """
             INSERT INTO messages (text, starts_at, ends_at, enabled, created_at, updated_at)
@@ -1535,7 +1571,7 @@ async def messages_update(message_id: int, message: MessageWrite):
     ends_at = _parse_local_datetime(message.ends_at)
     if ends_at <= starts_at:
         raise HTTPException(status_code=400, detail="End time must be after start time")
-    with _db() as conn:
+    with _db_connection() as conn:
         cursor = conn.execute(
             """
             UPDATE messages
@@ -1559,7 +1595,7 @@ async def messages_update(message_id: int, message: MessageWrite):
 
 @app.delete("/messages/{message_id}", summary="Delete a scheduled nurse message")
 async def messages_delete(message_id: int):
-    with _db() as conn:
+    with _db_connection() as conn:
         conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
     return {"status": "ok"}
 
