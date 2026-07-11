@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import main
 
@@ -18,7 +18,7 @@ class SharedStateTest(unittest.IsolatedAsyncioTestCase):
         self.tempdir.cleanup()
 
     def test_queue_persists_and_reorders_after_delete(self):
-        with main._db() as conn:
+        with main._db_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO playback_queue
@@ -38,7 +38,7 @@ class SharedStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(remaining[0]["position"], 1)
 
     def test_timer_state_counts_down_and_expires(self):
-        with main._db() as conn:
+        with main._db_connection() as conn:
             main._set_setting(conn, "timer_expires_at", str(main._now_ts() + 3600))
             active = main._timer_state(conn)
             main._set_setting(conn, "timer_expires_at", str(main._now_ts() - 1))
@@ -51,7 +51,7 @@ class SharedStateTest(unittest.IsolatedAsyncioTestCase):
 
     def test_active_messages_filter_by_window_and_enabled(self):
         now = main._now_ts()
-        with main._db() as conn:
+        with main._db_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO messages
@@ -70,9 +70,28 @@ class SharedStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([message["text"] for message in main._active_messages()], ["Active"])
 
+    def test_db_connection_closes_after_context(self):
+        with main._db_connection() as conn:
+            conn.execute("SELECT 1")
+
+        with self.assertRaisesRegex(Exception, "closed database"):
+            conn.execute("SELECT 1")
+
+    def test_plex_server_is_reused_and_closed(self):
+        plex = Mock()
+        main._plex_server_instance = None
+        with patch("main.PlexServer", return_value=plex) as constructor:
+            self.assertIs(main._plex_server(), plex)
+            self.assertIs(main._plex_server(), plex)
+            constructor.assert_called_once()
+
+        main._close_plex_server()
+        plex._session.close.assert_called_once_with()
+        self.assertIsNone(main._plex_server_instance)
+
     async def test_automation_plays_queue_before_timer_random(self):
         main._automation_lock = __import__("asyncio").Lock()
-        with main._db() as conn:
+        with main._db_connection() as conn:
             main._set_setting(conn, "timer_expires_at", str(main._now_ts() + 3600))
             conn.execute(
                 """
