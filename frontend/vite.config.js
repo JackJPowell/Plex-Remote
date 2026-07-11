@@ -9,6 +9,8 @@ export default defineConfig({
       "/tv": "http://127.0.0.1:8000",
       "/sunshine": "http://127.0.0.1:8000",
       "/plex": "http://127.0.0.1:8000",
+      "/playback": "http://127.0.0.1:8000",
+      "/messages": "http://127.0.0.1:8000",
       "/debug": "http://127.0.0.1:8000"
     }
   }

@@ -4,6 +4,7 @@ Designed for Home Assistant REST calls on a private LAN.
 """
 
 import asyncio
+import sqlite3
 import hashlib
 import json
 import logging
@@ -18,7 +19,8 @@ from typing import Optional
 from urllib.parse import quote
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from plexapi.server import PlexServer
@@ -48,6 +50,12 @@ ARTWORK_CACHE_DIR = Path(os.getenv(
     "ARTWORK_CACHE_DIR",
     os.path.join(os.path.dirname(__file__), ".cache", "artwork"),
 ))
+STATE_DB_PATH = Path(os.getenv(
+    "PLEX_REMOTE_DB",
+    os.path.join(os.path.dirname(__file__), ".cache", "plex-remote", "state.sqlite3"),
+))
+AUTOMATION_POLL_INTERVAL = float(os.getenv("AUTOMATION_POLL_INTERVAL", "4"))
+AUTOMATION_IDLE_GRACE_SECONDS = float(os.getenv("AUTOMATION_IDLE_GRACE_SECONDS", "6"))
 
 # Shared lock file — ensures only one cec-client process runs at a time.
 # status.sh also acquires this lock before calling cec-client.
@@ -68,6 +76,8 @@ _tv_status: Optional[str] = None
 _tv_power_refresh_task: Optional[asyncio.Task] = None
 _tv_power_last_refresh = 0.0
 _TV_POWER_REFRESH_INTERVAL = 15.0
+_automation_task: Optional[asyncio.Task] = None
+_automation_lock: Optional[asyncio.Lock] = None
 
 # D-Bus / XDG environment required for `systemctl --user` in subprocesses.
 # Captured at startup so worker threads and async handlers can pass them.
@@ -91,6 +101,218 @@ app.mount(
     StaticFiles(directory=FRONTEND_ASSETS_DIR, check_dir=False),
     name="spa-assets",
 )
+
+
+# ── Shared playback state ────────────────────────────────────────────────────
+
+
+class QueueCreate(BaseModel):
+    media_id: int
+    title: Optional[str] = None
+    media_type: Optional[str] = None
+    artwork_url: Optional[str] = None
+
+
+class QueueReorder(BaseModel):
+    ids: list[int]
+
+
+class TimerUpdate(BaseModel):
+    hours_delta: Optional[int] = None
+    clear: bool = False
+
+
+class MessageWrite(BaseModel):
+    text: str
+    starts_at: str
+    ends_at: str
+    enabled: bool = True
+
+
+def _now_ts() -> int:
+    return int(time.time())
+
+
+def _utc_iso(ts: Optional[int]) -> Optional[str]:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts).isoformat(timespec="minutes")
+
+
+def _parse_local_datetime(value: str) -> int:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid datetime: {value}") from exc
+    return int(parsed.timestamp())
+
+
+def _db() -> sqlite3.Connection:
+    STATE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(STATE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def _init_state_db() -> None:
+    with _db() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS playback_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position INTEGER NOT NULL,
+                media_id INTEGER NOT NULL,
+                title TEXT,
+                media_type TEXT,
+                artwork_url TEXT,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS playback_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL,
+                starts_at INTEGER NOT NULL,
+                ends_at INTEGER NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            """
+        )
+
+
+def _queue_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "position": row["position"],
+        "media_id": row["media_id"],
+        "title": row["title"],
+        "type": row["media_type"],
+        "artwork_url": row["artwork_url"],
+        "created_at": _utc_iso(row["created_at"]),
+    }
+
+
+def _message_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "text": row["text"],
+        "starts_at": _utc_iso(row["starts_at"]),
+        "ends_at": _utc_iso(row["ends_at"]),
+        "enabled": bool(row["enabled"]),
+        "active": bool(row["enabled"]) and row["starts_at"] <= _now_ts() <= row["ends_at"],
+        "created_at": _utc_iso(row["created_at"]),
+        "updated_at": _utc_iso(row["updated_at"]),
+    }
+
+
+def _get_setting(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT value FROM playback_settings WHERE key = ?",
+        (key,),
+    ).fetchone()
+    return row["value"] if row else None
+
+
+def _set_setting(conn: sqlite3.Connection, key: str, value: Optional[str]) -> None:
+    if value is None:
+        conn.execute("DELETE FROM playback_settings WHERE key = ?", (key,))
+        return
+    conn.execute(
+        """
+        INSERT INTO playback_settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+
+
+def _queue_items(conn: Optional[sqlite3.Connection] = None) -> list[dict]:
+    owns_conn = conn is None
+    conn = conn or _db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM playback_queue ORDER BY position ASC, id ASC"
+        ).fetchall()
+        return [_queue_row(row) for row in rows]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def _active_messages(conn: Optional[sqlite3.Connection] = None) -> list[dict]:
+    owns_conn = conn is None
+    conn = conn or _db()
+    try:
+        now = _now_ts()
+        rows = conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE enabled = 1 AND starts_at <= ? AND ends_at >= ?
+            ORDER BY starts_at ASC, id ASC
+            """,
+            (now, now),
+        ).fetchall()
+        return [_message_row(row) for row in rows]
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def _timer_state(conn: Optional[sqlite3.Connection] = None) -> dict:
+    owns_conn = conn is None
+    conn = conn or _db()
+    try:
+        raw = _get_setting(conn, "timer_expires_at")
+        expires_at = int(raw) if raw else None
+        remaining = max(0, expires_at - _now_ts()) if expires_at else 0
+        return {
+            "active": remaining > 0,
+            "expires_at": _utc_iso(expires_at),
+            "remaining_seconds": remaining,
+        }
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def _playback_state(now_playing: Optional[dict] = None) -> dict:
+    with _db() as conn:
+        return {
+            "queue": _queue_items(conn),
+            "timer": _timer_state(conn),
+            "active_messages": _active_messages(conn),
+            "now_playing": now_playing,
+        }
+
+
+def _next_queue_item() -> Optional[dict]:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM playback_queue ORDER BY position ASC, id ASC LIMIT 1"
+        ).fetchone()
+        return _queue_row(row) if row else None
+
+
+def _delete_queue_item(item_id: int) -> None:
+    with _db() as conn:
+        conn.execute("DELETE FROM playback_queue WHERE id = ?", (item_id,))
+        rows = conn.execute(
+            "SELECT id FROM playback_queue ORDER BY position ASC, id ASC"
+        ).fetchall()
+        for index, row in enumerate(rows, start=1):
+            conn.execute(
+                "UPDATE playback_queue SET position = ? WHERE id = ?",
+                (index, row["id"]),
+            )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -675,9 +897,48 @@ async def _resolve_play_item(plex: PlexServer, now_playing: dict, media_id: Opti
         )
 
 
+async def _resolve_random_movie_or_show(plex: PlexServer, now_playing: dict):
+    candidates: list[tuple[str, int]] = []
+    current_rating_key = str(now_playing["rating_key"])
+    for config in CURATED_MOVIES:
+        if _movie_config_is_random_eligible(config):
+            candidates.append(("movie", int(config["rating_key"])))
+    for config in CURATED_SHOWS:
+        candidates.append(("show", int(config["rating_key"])))
+
+    if not candidates:
+        raise HTTPException(
+            status_code=400,
+            detail="No curated movies or shows available for random playback",
+        )
+
+    filtered = [
+        candidate
+        for candidate in candidates
+        if str(candidate[1]) != current_rating_key
+    ]
+    media_type, rating_key = random.choice(filtered or candidates)
+    try:
+        item = plex.fetchItem(rating_key)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Curated item {rating_key} not found: {exc}"
+        )
+
+    if media_type == "show":
+        episodes = _episode_pool_for_show(item)
+        if not episodes:
+            raise HTTPException(
+                status_code=404, detail="No episodes found for that curated show"
+            )
+        return random.choice(episodes)
+    return item
+
+
 async def _play_plex_media(
     media_id: Optional[int],
     startup_timeout: int = PLEX_CLIENT_STARTUP_TIMEOUT,
+    random_movie_or_show: bool = False,
 ) -> dict:
     """Ensure HTPC is reachable, pick media, stop current playback, and play it."""
     started = _ensure_plex_htpc_running()
@@ -688,7 +949,10 @@ async def _play_plex_media(
 
     client = _plex_client(plex)
     now_playing = _plex_now_playing(plex)
-    item = await _resolve_play_item(plex, now_playing, media_id)
+    if random_movie_or_show:
+        item = await _resolve_random_movie_or_show(plex, now_playing)
+    else:
+        item = await _resolve_play_item(plex, now_playing, media_id)
 
     if now_playing["playing"]:
         try:
@@ -722,11 +986,72 @@ async def _play_plex_media(
     }
 
 
-def _run_play_media_job(media_id: Optional[int]) -> None:
+def _run_play_media_job(media_id: Optional[int], random_movie_or_show: bool = False) -> None:
     try:
-        asyncio.run(_play_plex_media(media_id))
+        asyncio.run(_play_plex_media(media_id, random_movie_or_show=random_movie_or_show))
     except Exception:
         logger.exception("Background Plex play command failed")
+
+
+async def _advance_automation(now_playing: dict, last_seen_playing: bool) -> bool:
+    if now_playing["playing"]:
+        return True
+
+    queue_item = _next_queue_item()
+    timer_active = _timer_state()["active"]
+    if not queue_item and not timer_active:
+        return False
+
+    if not last_seen_playing and not timer_active and not queue_item:
+        return False
+
+    async with _automation_lock:
+        refreshed_now_playing = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _plex_now_playing(_plex_server()),
+        )
+        if refreshed_now_playing["playing"]:
+            return True
+
+        queue_item = _next_queue_item()
+        if queue_item:
+            await _play_plex_media(queue_item["media_id"])
+            _delete_queue_item(queue_item["id"])
+            return True
+
+        if _timer_state()["active"]:
+            await _play_plex_media(None, random_movie_or_show=True)
+            return True
+
+    return False
+
+
+async def _automation_loop() -> None:
+    last_seen_playing = False
+    idle_since: Optional[float] = None
+    while True:
+        try:
+            now_playing = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: _plex_now_playing(_plex_server()),
+            )
+            if now_playing["playing"]:
+                last_seen_playing = True
+                idle_since = None
+            else:
+                if idle_since is None:
+                    idle_since = time.monotonic()
+                if time.monotonic() - idle_since >= AUTOMATION_IDLE_GRACE_SECONDS:
+                    last_seen_playing = await _advance_automation(
+                        now_playing,
+                        last_seen_playing,
+                    )
+                    idle_since = None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Playback automation loop failed")
+        await asyncio.sleep(AUTOMATION_POLL_INTERVAL)
 
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -812,6 +1137,210 @@ def _spa_response():
 async def spa_page():
     """Serve the built React SPA."""
     return _spa_response()
+
+
+@app.on_event("startup")
+async def app_startup() -> None:
+    global _automation_task, _automation_lock
+    _init_state_db()
+    _automation_lock = asyncio.Lock()
+    _automation_task = asyncio.create_task(_automation_loop())
+
+
+@app.on_event("shutdown")
+async def app_shutdown() -> None:
+    if _automation_task is not None:
+        _automation_task.cancel()
+        try:
+            await _automation_task
+        except asyncio.CancelledError:
+            pass
+
+
+# ── Shared Playback State ────────────────────────────────────────────────────
+
+
+@app.get("/playback/state", summary="Queue, timer, messages, and now-playing state")
+async def playback_state():
+    now_playing = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: _plex_now_playing(_plex_server()),
+    )
+    return _playback_state(now_playing)
+
+
+@app.post("/playback/timer", summary="Adjust or clear playback automation timer")
+async def playback_timer(update: TimerUpdate):
+    with _db() as conn:
+        if update.clear:
+            _set_setting(conn, "timer_expires_at", None)
+        else:
+            delta = update.hours_delta or 0
+            if delta != 0:
+                current = _timer_state(conn)
+                base = int(_get_setting(conn, "timer_expires_at") or 0)
+                if not current["active"]:
+                    base = _now_ts()
+                expires_at = max(_now_ts(), base + (delta * 3600))
+                if expires_at <= _now_ts():
+                    _set_setting(conn, "timer_expires_at", None)
+                else:
+                    _set_setting(conn, "timer_expires_at", str(expires_at))
+        return _timer_state(conn)
+
+
+@app.get("/playback/queue", summary="List queued playback items")
+async def playback_queue():
+    return _queue_items()
+
+
+@app.post("/playback/queue", summary="Add media to the shared playback queue")
+async def playback_queue_add(item: QueueCreate):
+    title = item.title
+    media_type = item.media_type
+    artwork_url = item.artwork_url
+    if not title or not media_type or not artwork_url:
+        def load_metadata():
+            media = _plex_server().fetchItem(item.media_id)
+            return _serialize_media_item(media)
+
+        try:
+            metadata = await asyncio.get_running_loop().run_in_executor(None, load_metadata)
+            title = title or metadata.get("title")
+            media_type = media_type or metadata.get("type")
+            artwork_url = artwork_url or metadata.get("artwork_url")
+        except Exception:
+            title = title or f"Media {item.media_id}"
+
+    with _db() as conn:
+        row = conn.execute("SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM playback_queue").fetchone()
+        conn.execute(
+            """
+            INSERT INTO playback_queue
+                (position, media_id, title, media_type, artwork_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["next_position"],
+                item.media_id,
+                title,
+                media_type,
+                artwork_url,
+                _now_ts(),
+            ),
+        )
+        return {"status": "ok", "queue": _queue_items(conn)}
+
+
+@app.delete("/playback/queue", summary="Clear queued playback items")
+async def playback_queue_clear():
+    with _db() as conn:
+        conn.execute("DELETE FROM playback_queue")
+    return {"status": "ok", "queue": []}
+
+
+@app.delete("/playback/queue/{item_id}", summary="Remove one queued playback item")
+async def playback_queue_delete(item_id: int):
+    _delete_queue_item(item_id)
+    return {"status": "ok", "queue": _queue_items()}
+
+
+@app.post("/playback/queue/{item_id}/play-now", summary="Play one queued item now")
+async def playback_queue_play_now(item_id: int):
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM playback_queue WHERE id = ?",
+            (item_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Queued item not found")
+    _delete_queue_item(item_id)
+    asyncio.get_running_loop().run_in_executor(
+        None,
+        _run_play_media_job,
+        row["media_id"],
+        False,
+    )
+    return {"status": "accepted", "action": "play", "queue": _queue_items()}
+
+
+@app.post("/playback/queue/reorder", summary="Reorder queued playback items")
+async def playback_queue_reorder(ordering: QueueReorder):
+    with _db() as conn:
+        rows = conn.execute("SELECT id FROM playback_queue").fetchall()
+        existing = {row["id"] for row in rows}
+        requested = [item_id for item_id in ordering.ids if item_id in existing]
+        missing = [item_id for item_id in existing if item_id not in requested]
+        for index, item_id in enumerate([*requested, *missing], start=1):
+            conn.execute(
+                "UPDATE playback_queue SET position = ? WHERE id = ?",
+                (index, item_id),
+            )
+        return {"status": "ok", "queue": _queue_items(conn)}
+
+
+@app.get("/messages", summary="List scheduled nurse messages")
+async def messages_list(request: Request):
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and "application/json" not in accept:
+        return _spa_response()
+    with _db() as conn:
+        rows = conn.execute("SELECT * FROM messages ORDER BY starts_at DESC, id DESC").fetchall()
+        return [_message_row(row) for row in rows]
+
+
+@app.post("/messages", summary="Create a scheduled nurse message")
+async def messages_create(message: MessageWrite):
+    starts_at = _parse_local_datetime(message.starts_at)
+    ends_at = _parse_local_datetime(message.ends_at)
+    if ends_at <= starts_at:
+        raise HTTPException(status_code=400, detail="End time must be after start time")
+    now = _now_ts()
+    with _db() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO messages (text, starts_at, ends_at, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (message.text.strip(), starts_at, ends_at, int(message.enabled), now, now),
+        )
+        row = conn.execute("SELECT * FROM messages WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        return _message_row(row)
+
+
+@app.put("/messages/{message_id}", summary="Update a scheduled nurse message")
+async def messages_update(message_id: int, message: MessageWrite):
+    starts_at = _parse_local_datetime(message.starts_at)
+    ends_at = _parse_local_datetime(message.ends_at)
+    if ends_at <= starts_at:
+        raise HTTPException(status_code=400, detail="End time must be after start time")
+    with _db() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE messages
+            SET text = ?, starts_at = ?, ends_at = ?, enabled = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                message.text.strip(),
+                starts_at,
+                ends_at,
+                int(message.enabled),
+                _now_ts(),
+                message_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Message not found")
+        row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        return _message_row(row)
+
+
+@app.delete("/messages/{message_id}", summary="Delete a scheduled nurse message")
+async def messages_delete(message_id: int):
+    with _db() as conn:
+        conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+    return {"status": "ok"}
 
 
 # ── TV Control ────────────────────────────────────────────────────────────────
