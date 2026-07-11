@@ -506,7 +506,7 @@ function TimerControls({ timer, actions, pending }) {
   );
 }
 
-function NowPlayingPanel({ nowPlaying, playbackState, actions, pending, compact = false, onQueueOpen }) {
+function NowPlayingPanel({ nowPlaying, playbackState, actions, pending, compact = false, onQueueOpen, tvStatus }) {
   const [rotationIndex, setRotationIndex] = useState(0);
   const messages = Array.isArray(playbackState?.active_messages) ? playbackState.active_messages : [];
   const queue = Array.isArray(playbackState?.queue) ? playbackState.queue : [];
@@ -536,6 +536,8 @@ function NowPlayingPanel({ nowPlaying, playbackState, actions, pending, compact 
   const message = messages.length > 0 && rotationIndex > 0
     ? messages[(rotationIndex - 1) % messages.length]
     : null;
+  const tvIsOn = tvStatus === "on" || tvStatus === true;
+  const tvPowerPending = pending.has("tv-on") || pending.has("tv-off");
 
   return (
     <section className={`now-panel ${compact ? "compact" : ""}`}>
@@ -545,6 +547,7 @@ function NowPlayingPanel({ nowPlaying, playbackState, actions, pending, compact 
         <IconButton icon={SkipForward} label="Next" onClick={actions.next} disabled={pending.has("next")} />
         {compact && onQueueOpen && <div className="control-gap" aria-hidden="true" />}
         {compact && onQueueOpen && <IconButton icon={List} label="Queue" onClick={onQueueOpen} active={queue.length > 0} />}
+        {compact && <IconButton icon={Power} label={`Turn TV ${tvIsOn ? "off" : "on"}`} onClick={tvIsOn ? actions.tvOff : actions.tvOn} disabled={tvPowerPending} active={tvIsOn} />}
         {compact && <IconButton icon={Settings} label="Settings" href="/settings" />}
       </div>
       <div className="now-content">
@@ -866,11 +869,11 @@ function HomeView(props) {
 }
 
 function EchoView(props) {
-  const { nowPlaying, playbackState, actions, pending, movies, shows, error } = props;
+  const { status, nowPlaying, playbackState, actions, pending, movies, shows, error } = props;
   const [queueOpen, setQueueOpen] = useState(false);
   return (
     <main className="echo-page">
-      <NowPlayingPanel nowPlaying={nowPlaying} playbackState={playbackState} actions={actions} pending={pending} compact onQueueOpen={() => setQueueOpen(true)} />
+      <NowPlayingPanel nowPlaying={nowPlaying} playbackState={playbackState} actions={actions} pending={pending} compact onQueueOpen={() => setQueueOpen(true)} tvStatus={status?.tv_status} />
       <MediaBrowser movies={movies} shows={shows} actions={actions} pending={pending} nowPlaying={nowPlaying} echo />
       <QueueDrawer open={queueOpen} onClose={() => setQueueOpen(false)} queue={playbackState.queue} actions={actions} pending={pending} />
       {error && <div className="toast echo-toast">{error}</div>}
