@@ -402,6 +402,7 @@ button {
   color: var(--text);
   text-align: left;
   cursor: pointer;
+  padding: 0;
 }
 
 .media-row.split {
