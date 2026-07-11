@@ -14,6 +14,7 @@ import re
 import subprocess
 import time
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -25,6 +26,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, ImageOps
 from plexapi.server import PlexServer
 
 load_dotenv()
@@ -52,6 +54,9 @@ ARTWORK_CACHE_DIR = Path(os.getenv(
     "ARTWORK_CACHE_DIR",
     os.path.join(os.path.dirname(__file__), ".cache", "artwork"),
 ))
+ARTWORK_MAX_HEIGHT = int(os.getenv("ARTWORK_MAX_HEIGHT", "300"))
+ARTWORK_WEBP_QUALITY = int(os.getenv("ARTWORK_WEBP_QUALITY", "75"))
+ARTWORK_CACHE_VERSION = 1
 STATE_DB_PATH = Path(os.getenv(
     "PLEX_REMOTE_DB",
     os.path.join(os.path.dirname(__file__), ".cache", "plex-remote", "state.sqlite3"),
@@ -547,7 +552,8 @@ def _media_artwork_url(item) -> Optional[str]:
     if not artwork_path:
         return None
     rating_key = getattr(item, "ratingKey", None)
-    url = f"/plex/artwork?path={quote(artwork_path, safe='')}"
+    variant = f"poster-h{ARTWORK_MAX_HEIGHT}-webp-v{ARTWORK_CACHE_VERSION}"
+    url = f"/plex/artwork?path={quote(artwork_path, safe='')}&variant={variant}"
     if rating_key is not None:
         url += f"&rating_key={quote(str(rating_key), safe='')}"
     return url
@@ -709,12 +715,28 @@ def _read_cached_artwork(path: str, rating_key: Optional[str]) -> Optional[FileR
     image_path, meta_path = _artwork_cache_paths(path, rating_key)
     if not image_path.exists():
         return None
-    media_type = "image/jpeg"
+    meta = {}
     try:
         meta = json.loads(meta_path.read_text())
-        media_type = meta.get("content_type") or media_type
     except Exception:
         pass
+    cache_is_current = (
+        meta.get("optimization_version") == ARTWORK_CACHE_VERSION
+        and meta.get("max_height") == ARTWORK_MAX_HEIGHT
+        and meta.get("quality") == ARTWORK_WEBP_QUALITY
+    )
+    if not cache_is_current:
+        try:
+            _write_cached_artwork(
+                path,
+                rating_key,
+                image_path.read_bytes(),
+                meta.get("content_type", "image/jpeg"),
+            )
+            meta = json.loads(meta_path.read_text())
+        except Exception as exc:
+            logger.warning("Could not optimize cached artwork %s: %s", image_path, exc)
+    media_type = meta.get("content_type") or "image/jpeg"
     return FileResponse(
         image_path,
         media_type=media_type,
@@ -727,11 +749,43 @@ def _write_cached_artwork(
     rating_key: Optional[str],
     content: bytes,
     content_type: str,
-) -> None:
+) -> bytes:
     image_path, meta_path = _artwork_cache_paths(path, rating_key)
     ARTWORK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    image_path.write_bytes(content)
-    meta_path.write_text(json.dumps({"path": path, "content_type": content_type}))
+    with Image.open(BytesIO(content)) as source:
+        image = ImageOps.exif_transpose(source)
+        if image.height > ARTWORK_MAX_HEIGHT:
+            width = max(1, round(image.width * ARTWORK_MAX_HEIGHT / image.height))
+            image = image.resize((width, ARTWORK_MAX_HEIGHT), Image.Resampling.LANCZOS)
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+        output = BytesIO()
+        image.save(
+            output,
+            format="WEBP",
+            quality=ARTWORK_WEBP_QUALITY,
+            method=4,
+        )
+        optimized = output.getvalue()
+        metadata = {
+            "path": path,
+            "content_type": "image/webp",
+            "source_content_type": content_type,
+            "optimization_version": ARTWORK_CACHE_VERSION,
+            "max_height": ARTWORK_MAX_HEIGHT,
+            "width": image.width,
+            "height": image.height,
+            "quality": ARTWORK_WEBP_QUALITY,
+        }
+
+    temp_id = f"{os.getpid()}-{time.time_ns()}"
+    image_tmp = image_path.with_name(f"{image_path.name}.{temp_id}.tmp")
+    meta_tmp = meta_path.with_name(f"{meta_path.name}.{temp_id}.tmp")
+    image_tmp.write_bytes(optimized)
+    meta_tmp.write_text(json.dumps(metadata))
+    image_tmp.replace(image_path)
+    meta_tmp.replace(meta_path)
+    return optimized
 
 
 def _stop_plex_playback(client) -> None:
@@ -1863,10 +1917,10 @@ async def plex_artwork(path: str = Query(...), rating_key: Optional[str] = Query
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Cannot load artwork: {exc}")
     content_type = result.headers.get("content-type", "image/jpeg")
-    _write_cached_artwork(path, rating_key, result.content, content_type)
+    optimized = _write_cached_artwork(path, rating_key, result.content, content_type)
     return Response(
-        content=result.content,
-        media_type=content_type,
+        content=optimized,
+        media_type="image/webp",
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
 
