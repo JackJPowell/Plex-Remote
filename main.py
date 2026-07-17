@@ -986,17 +986,17 @@ def _schedule_tv_power_refresh() -> None:
 
 
 async def _ensure_tv_on() -> bool:
-    """Turn the TV on if CEC reports it is off or unknown."""
-    current = await _query_tv_power()
-    if current == "on":
-        return False
+    """Send the idempotent TV-on command before playback.
 
+    Some TVs return a stale CEC power status, so the query is useful for the
+    response metadata but must not decide whether the working on command is
+    sent.
+    """
+    global _tv_status
+    current = await _query_tv_power()
     _cec("on 0")
-    for _ in range(6):
-        await asyncio.sleep(1)
-        if await _query_tv_power() == "on":
-            return True
-    return True
+    _tv_status = "on"
+    return current != "on"
 
 
 def _ensure_plex_htpc_running() -> bool:
@@ -1124,8 +1124,10 @@ async def _play_plex_media(
     media_id: Optional[int],
     startup_timeout: int = PLEX_CLIENT_STARTUP_TIMEOUT,
     random_movie_or_show: bool = False,
+    ensure_tv: bool = True,
 ) -> dict:
-    """Ensure HTPC is reachable, pick media, stop current playback, and play it."""
+    """Ensure the TV and HTPC are ready, then select and play media."""
+    tv_powered_on = await _ensure_tv_on() if ensure_tv else False
     started = _ensure_plex_htpc_running()
     plex = _plex_server()
 
@@ -1166,6 +1168,7 @@ async def _play_plex_media(
         "playing": item.title,
         "type": item.type,
         "rating_key": item.ratingKey,
+        "tv_powered_on": tv_powered_on,
         "plex_started": started,
         "command_timed_out": command_timed_out,
     }
@@ -1849,7 +1852,11 @@ async def plex_smart_play(
             "playing": now_playing["display_title"],
         }
 
-    result = await _play_plex_media(media_id, startup_timeout=PLEX_CLIENT_STARTUP_TIMEOUT)
+    result = await _play_plex_media(
+        media_id,
+        startup_timeout=PLEX_CLIENT_STARTUP_TIMEOUT,
+        ensure_tv=False,
+    )
     result["tv_powered_on"] = tv_powered_on
     result["plex_started"] = started or result["plex_started"]
     return result
@@ -2048,7 +2055,15 @@ async def debug_config():
 def main():
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        # Polling dashboards can leave requests waiting on Plex network
+        # timeouts. Do not let those requests hold up a service restart.
+        timeout_graceful_shutdown=5,
+    )
 
 
 if __name__ == "__main__":

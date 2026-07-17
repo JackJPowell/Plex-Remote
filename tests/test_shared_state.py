@@ -112,6 +112,39 @@ class SharedStateTest(unittest.IsolatedAsyncioTestCase):
         play.assert_awaited_once_with(303)
         self.assertEqual(main._queue_items(), [])
 
+    async def test_play_media_ensures_tv_is_on_before_starting_htpc(self):
+        item = Mock(title="Selected Movie", type="movie", ratingKey=404)
+        client = Mock()
+        idle = {"playing": False, "rating_key": None}
+        startup_order = []
+
+        with patch("main._ensure_tv_on", new=AsyncMock(
+                 side_effect=lambda: startup_order.append("tv") or True,
+             )) as ensure_tv, \
+             patch("main._ensure_plex_htpc_running",
+                   side_effect=lambda: startup_order.append("htpc") or False) as ensure_htpc, \
+             patch("main._plex_server", return_value=object()), \
+             patch("main._plex_client", return_value=client), \
+             patch("main._plex_now_playing", return_value=idle), \
+             patch("main._resolve_play_item", new=AsyncMock(return_value=item)), \
+             patch("main._send_play_command", new=AsyncMock(return_value=False)):
+            result = await main._play_plex_media(404)
+
+        ensure_tv.assert_awaited_once_with()
+        ensure_htpc.assert_called_once_with()
+        self.assertEqual(startup_order, ["tv", "htpc"])
+        self.assertTrue(result["tv_powered_on"])
+
+    async def test_ensure_tv_on_sends_command_even_when_query_reports_on(self):
+        main._tv_status = None
+        with patch("main._query_tv_power", new=AsyncMock(return_value="on")), \
+             patch("main._cec") as cec:
+            powered_on = await main._ensure_tv_on()
+
+        cec.assert_called_once_with("on 0")
+        self.assertFalse(powered_on)
+        self.assertEqual(main._tv_status, "on")
+
 
 if __name__ == "__main__":
     unittest.main()
