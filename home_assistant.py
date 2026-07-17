@@ -12,8 +12,8 @@ import websockets
 
 logger = logging.getLogger("plex-remote.home-assistant")
 
-CHAIR_ENTITY_ID = "binary_sensor.everything_presence_lite_f1bbc8_zone_1_occupancy"
-BED_ENTITY_ID = "binary_sensor.everything_presence_lite_f1bbc8_zone_2_occupancy"
+CHAIR_ENTITY_ID = "binary_sensor.dads_chair_zone_stable"
+BED_ENTITY_ID = "binary_sensor.dads_bed_zone_stable"
 ENTITY_IDS = (CHAIR_ENTITY_ID, BED_ENTITY_ID)
 
 
