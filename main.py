@@ -31,6 +31,8 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from plexapi.server import PlexServer
 
+from home_assistant import HomeAssistantStateMonitor
+
 load_dotenv()
 logger = logging.getLogger("plex-remote")
 
@@ -65,6 +67,8 @@ STATE_DB_PATH = Path(os.getenv(
 ))
 AUTOMATION_POLL_INTERVAL = float(os.getenv("AUTOMATION_POLL_INTERVAL", "4"))
 AUTOMATION_IDLE_GRACE_SECONDS = float(os.getenv("AUTOMATION_IDLE_GRACE_SECONDS", "6"))
+HOME_ASSISTANT_URL = os.getenv("HOME_ASSISTANT_URL", "").strip()
+HOME_ASSISTANT_ACCESS_TOKEN = os.getenv("HOME_ASSISTANT_ACCESS_TOKEN", "").strip()
 
 # Shared lock file — ensures only one cec-client process runs at a time.
 # status.sh also acquires this lock before calling cec-client.
@@ -89,6 +93,10 @@ _automation_task: Optional[asyncio.Task] = None
 _automation_lock: Optional[asyncio.Lock] = None
 _plex_server_instance: Optional[PlexServer] = None
 _plex_server_lock = threading.Lock()
+_home_assistant_monitor = HomeAssistantStateMonitor(
+    HOME_ASSISTANT_URL,
+    HOME_ASSISTANT_ACCESS_TOKEN,
+)
 
 # D-Bus / XDG environment required for `systemctl --user` in subprocesses.
 # Captured at startup so worker threads and async handlers can pass them.
@@ -1290,6 +1298,12 @@ async def get_status() -> dict:
         )
 
 
+@app.get("/home-assistant/occupancy", summary="Chair and bed occupancy state")
+async def home_assistant_occupancy() -> dict:
+    """Return the latest states cached by the Home Assistant WebSocket client."""
+    return _home_assistant_monitor.snapshot()
+
+
 @app.get("/api/logs", summary="Query persisted error logs")
 async def get_error_logs(
     start: Optional[str] = Query(None),
@@ -1404,10 +1418,12 @@ async def app_startup() -> None:
     _init_state_db()
     _automation_lock = asyncio.Lock()
     _automation_task = asyncio.create_task(_automation_loop())
+    _home_assistant_monitor.start()
 
 
 @app.on_event("shutdown")
 async def app_shutdown() -> None:
+    await _home_assistant_monitor.stop()
     if _automation_task is not None:
         _automation_task.cancel()
         try:

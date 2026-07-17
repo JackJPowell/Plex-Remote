@@ -58,6 +58,8 @@ button {
 
 .topbar nav {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 
@@ -117,6 +119,15 @@ button {
   background: var(--accent);
   border-color: var(--accent);
   color: #151515;
+}
+
+.icon-button.occupancy-status {
+  cursor: default;
+}
+
+.icon-button.occupancy-unknown {
+  color: var(--muted);
+  cursor: default;
 }
 
 .icon-button:disabled,

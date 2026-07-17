@@ -12,6 +12,21 @@ uv run python main.py
 
 The API continues to expose JSON endpoints such as `/status`, `/plex/play`, `/plex/stop`, `/plex/start`, `/sunshine/start`, and `/tv/power/on` for Home Assistant or other callers.
 
+## Home Assistant Occupancy
+
+Add the Home Assistant address and a long-lived access token to `.env`:
+
+```bash
+touch .env && chmod 600 .env
+printf '%s\n' 'HOME_ASSISTANT_URL=http://homeassistant.local:8123' >> .env
+read -rsp 'Home Assistant token: ' HA_TOKEN && printf '\nHOME_ASSISTANT_ACCESS_TOKEN=%s\n' "$HA_TOKEN" >> .env && unset HA_TOKEN
+```
+
+Restart the API after setting these values. The server authenticates to Home
+Assistant over `/api/websocket`, caches the chair and bed binary sensors, and
+automatically reconnects after a disconnect. Only those two entities are
+included in the ongoing state-change subscription.
+
 ## Frontend
 
 The SPA lives in `frontend/`.

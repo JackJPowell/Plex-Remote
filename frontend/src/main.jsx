@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  Armchair,
   ArrowLeft,
+  BedDouble,
   Check,
   ChevronDown,
   ChevronUp,
@@ -45,6 +47,15 @@ const EMPTY_PLAYBACK_STATE = {
   timer: { active: false, expires_at: null, remaining_seconds: 0 },
   active_messages: [],
   now_playing: null
+};
+
+const EMPTY_OCCUPANCY_STATE = {
+  configured: false,
+  connected: false,
+  zones: {
+    chair: { occupied: null, state: null },
+    bed: { occupied: null, state: null }
+  }
 };
 
 const STATUS_HOLD_MS = 18000;
@@ -206,6 +217,7 @@ function usePlexRemote() {
   });
   const [nowPlaying, setNowPlaying] = useState(EMPTY_NOW_PLAYING);
   const [playbackState, setPlaybackState] = useState(EMPTY_PLAYBACK_STATE);
+  const [occupancy, setOccupancy] = useState(EMPTY_OCCUPANCY_STATE);
   const [movies, setMovies] = useState([]);
   const [shows, setShows] = useState([]);
   const [error, setError] = useState(null);
@@ -296,12 +308,22 @@ function usePlexRemote() {
     setShows(showData);
   }, []);
 
+  const refreshOccupancy = useCallback(async (signal) => {
+    const data = await getJson("/home-assistant/occupancy", signal);
+    setOccupancy({
+      ...EMPTY_OCCUPANCY_STATE,
+      ...data,
+      zones: { ...EMPTY_OCCUPANCY_STATE.zones, ...(data.zones || {}) }
+    });
+  }, []);
+
   const refreshAll = useCallback(async () => {
     const controller = new AbortController();
     try {
       await Promise.all([
         refreshStatus(controller.signal),
         refreshPlaybackState(controller.signal),
+        refreshOccupancy(controller.signal),
         refreshCatalog(controller.signal)
       ]);
       setError(null);
@@ -309,28 +331,30 @@ function usePlexRemote() {
       setError(err.message);
     }
     return () => controller.abort();
-  }, [refreshCatalog, refreshPlaybackState, refreshStatus]);
+  }, [refreshCatalog, refreshOccupancy, refreshPlaybackState, refreshStatus]);
 
   useEffect(() => {
     const controller = new AbortController();
     Promise.all([
       refreshStatus(controller.signal),
       refreshPlaybackState(controller.signal),
+      refreshOccupancy(controller.signal),
       refreshCatalog(controller.signal)
     ]).catch((err) => setError(err.message));
     return () => controller.abort();
-  }, [refreshCatalog, refreshPlaybackState, refreshStatus]);
+  }, [refreshCatalog, refreshOccupancy, refreshPlaybackState, refreshStatus]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
       const controller = new AbortController();
       Promise.all([
         refreshStatus(controller.signal),
-        refreshPlaybackState(controller.signal)
+        refreshPlaybackState(controller.signal),
+        refreshOccupancy(controller.signal)
       ]).catch((err) => setError(err.message));
     }, 3500);
     return () => window.clearInterval(id);
-  }, [refreshPlaybackState, refreshStatus]);
+  }, [refreshOccupancy, refreshPlaybackState, refreshStatus]);
 
   const afterSharedChange = useCallback(() => {
     const controller = new AbortController();
@@ -485,6 +509,7 @@ function usePlexRemote() {
     status,
     nowPlaying,
     playbackState,
+    occupancy,
     movies,
     shows,
     error,
@@ -888,14 +913,30 @@ function ServicePill({ label, value }) {
   );
 }
 
+function OccupancyButton({ icon, label, zone, connected }) {
+  const occupied = zone?.occupied;
+  const stateLabel = occupied === true ? "occupied" : occupied === false ? "unoccupied" : "unknown";
+  const connectionLabel = connected ? "" : " (Home Assistant disconnected)";
+  return (
+    <IconButton
+      icon={icon}
+      label={`${label}: ${stateLabel}${connectionLabel}`}
+      active={connected && occupied === true}
+      tone={!connected || occupied === null || occupied === undefined ? "occupancy-unknown" : "occupancy-status"}
+    />
+  );
+}
+
 function HomeView(props) {
-  const { status, nowPlaying, playbackState, actions, pending, movies, shows, error, lastUpdated, refreshAll } = props;
+  const { status, nowPlaying, playbackState, occupancy, actions, pending, movies, shows, error, lastUpdated, refreshAll } = props;
   const [queueOpen, setQueueOpen] = useState(false);
   return (
     <main className="app-page">
       <header className="topbar">
         <a className="brand" href="/"><Clapperboard size={22} />Plex Remote</a>
         <nav>
+          <OccupancyButton icon={Armchair} label="Chair" zone={occupancy.zones.chair} connected={occupancy.connected} />
+          <OccupancyButton icon={BedDouble} label="Bed" zone={occupancy.zones.bed} connected={occupancy.connected} />
           <IconButton icon={List} label="Queue" onClick={() => setQueueOpen(true)} active={playbackState.queue.length > 0} />
           <IconButton icon={MessageSquare} label="Messages" href="/messages" active={playbackState.active_messages.length > 0} />
           <IconButton icon={ScrollText} label="Logs" href="/logs" />
