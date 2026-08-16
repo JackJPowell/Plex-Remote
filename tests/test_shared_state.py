@@ -145,6 +145,18 @@ class SharedStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(powered_on)
         self.assertEqual(main._tv_status, "on")
 
+    async def test_plex_seek_converts_percentage_to_playback_offset(self):
+        client = Mock()
+        now_playing = {"playing": True, "duration": 7200000}
+        with patch("main._plex_server", return_value=object()), \
+             patch("main._plex_now_playing", return_value=now_playing), \
+             patch("main._plex_client", return_value=client):
+            result = await main.plex_seek(main.SeekUpdate(percent=25))
+
+        client.seekTo.assert_called_once_with(1800000, mtype="video")
+        self.assertEqual(result["percent"], 25)
+        self.assertEqual(result["offset"], 1800000)
+
 
 if __name__ == "__main__":
     unittest.main()

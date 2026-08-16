@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
@@ -148,6 +148,10 @@ class QueueReorder(BaseModel):
 class TimerUpdate(BaseModel):
     hours_delta: Optional[int] = None
     clear: bool = False
+
+
+class SeekUpdate(BaseModel):
+    percent: float = Field(ge=0, le=100)
 
 
 class MessageWrite(BaseModel):
@@ -2080,6 +2084,40 @@ async def plex_resume():
             detail=f"Failed to send resume command to Plex client '{PLEX_CLIENT_NAME}': {exc}",
         )
     return {"status": "ok", "action": "resume"}
+
+
+@app.post("/plex/seek", summary="Seek Plex playback to a percentage of its duration")
+async def plex_seek(update: SeekUpdate):
+    """Convert a playback percentage to milliseconds and seek the active video."""
+    loop = asyncio.get_running_loop()
+
+    def seek():
+        plex = _plex_server()
+        now_playing = _plex_now_playing(plex)
+        duration = now_playing["duration"]
+        if not now_playing["playing"] or not duration:
+            raise HTTPException(status_code=409, detail="No seekable media is playing")
+
+        offset = round(duration * update.percent / 100)
+        offset = max(0, min(duration, offset))
+        _plex_client(plex).seekTo(offset, mtype="video")
+        return {
+            "status": "ok",
+            "action": "seek",
+            "percent": update.percent,
+            "offset": offset,
+            "duration": duration,
+        }
+
+    try:
+        return await loop.run_in_executor(None, seek)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to seek Plex client '{PLEX_CLIENT_NAME}': {exc}",
+        ) from exc
 
 @app.get("/debug/config")
 async def debug_config():

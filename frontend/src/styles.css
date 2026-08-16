@@ -241,17 +241,50 @@ button {
   width: 100%;
   height: 9px;
   margin-top: 22px;
-  overflow: hidden;
+  appearance: none;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.progress-track:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.progress-track::-webkit-slider-runnable-track {
+  height: 9px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--accent) 0 var(--progress), #33363b var(--progress) 100%);
+}
+
+.progress-track::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  margin-top: -4.5px;
+  appearance: none;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.progress-track::-moz-range-track {
+  height: 9px;
   border-radius: 999px;
   background: #33363b;
 }
 
-.progress-track span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
+.progress-track::-moz-range-progress {
+  height: 9px;
+  border-radius: 999px;
   background: var(--accent);
-  transition: width 400ms ease;
+}
+
+.progress-track::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .rotating-pane {

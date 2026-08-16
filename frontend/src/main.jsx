@@ -469,6 +469,15 @@ function usePlexRemote() {
     playQueueItemNow: (item) => sharedCommand(`queue-play-${item.id}`, () => postJson(`/playback/queue/${item.id}/play-now`)),
     adjustTimer: (hours) => sharedCommand(`timer-${hours > 0 ? "plus" : "minus"}`, () => postJson("/playback/timer", { hours_delta: hours })),
     clearTimer: () => sharedCommand("timer-clear", () => postJson("/playback/timer", { clear: true })),
+    seek: (percent) => sharedCommand("seek", async () => {
+      const result = await postJson("/plex/seek", { percent });
+      setNowPlaying((old) => ({
+        ...old,
+        progress: result.offset,
+        progress_percent: result.percent
+      }));
+      return result;
+    }),
     plexStart: () => command("plex-start", "/plex/start", ({ holdStatus }) => {
       holdStatus({ plex_htpc_running: true });
     }),
@@ -543,6 +552,7 @@ function TimerControls({ timer, actions, pending }) {
 
 function NowPlayingPanel({ nowPlaying, playbackState, actions, pending, compact = false, onQueueOpen, tvStatus }) {
   const [rotationIndex, setRotationIndex] = useState(0);
+  const [seekProgress, setSeekProgress] = useState(null);
   const messages = Array.isArray(playbackState?.active_messages) ? playbackState.active_messages : [];
   const queue = Array.isArray(playbackState?.queue) ? playbackState.queue : [];
 
@@ -563,6 +573,16 @@ function NowPlayingPanel({ nowPlaying, playbackState, actions, pending, compact 
   const progress = Number.isFinite(Number(nowPlaying?.progress_percent))
     ? Math.max(0, Math.min(100, Number(nowPlaying.progress_percent)))
     : 0;
+  const canSeek = hasMedia && Number(nowPlaying?.duration) > 0;
+
+  useEffect(() => {
+    setSeekProgress(null);
+  }, [nowPlaying?.progress_percent]);
+
+  const commitSeek = useCallback((value) => {
+    if (!canSeek || pending.has("seek")) return;
+    actions.seek(Number(value));
+  }, [actions, canSeek, pending]);
   const playPause = isPlaying
     ? { icon: Pause, label: "Pause", action: actions.pause, key: "pause" }
     : state === "paused"
@@ -608,9 +628,25 @@ function NowPlayingPanel({ nowPlaying, playbackState, actions, pending, compact 
               <div className="media-copy">
                 <div className="state-line">{hasMedia ? statusLabel(nowPlaying.state, "Playing", "Paused") : "Idle"}</div>
                 <h1>{titleFor(nowPlaying)}</h1>
-                <div className="progress-track" aria-hidden="true">
-                  <span style={{ width: `${progress}%` }} />
-                </div>
+                <input
+                  className="progress-track"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  value={seekProgress ?? progress}
+                  style={{ "--progress": `${seekProgress ?? progress}%` }}
+                  onChange={(event) => setSeekProgress(Number(event.target.value))}
+                  onPointerUp={(event) => commitSeek(event.currentTarget.value)}
+                  onKeyUp={(event) => {
+                    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+                      commitSeek(event.currentTarget.value);
+                    }
+                  }}
+                  disabled={!canSeek || pending.has("seek")}
+                  aria-label="Playback progress"
+                  aria-valuetext={`${Math.round(seekProgress ?? progress)} percent`}
+                />
               </div>
             </>
           )}
