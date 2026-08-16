@@ -42,6 +42,9 @@ PLEX_TOKEN = os.getenv("PLEX_TOKEN", "QU9t1Z4UQu8-3jxKzBw6")
 PLEX_TIMEOUT = int(os.getenv("PLEX_TIMEOUT", "30"))
 PLEX_PLAY_COMMAND_TIMEOUT = int(os.getenv("PLEX_PLAY_COMMAND_TIMEOUT", "5"))
 PLEX_CLIENT_STARTUP_TIMEOUT = int(os.getenv("PLEX_CLIENT_STARTUP_TIMEOUT", "45"))
+PLEX_RECOVERY_STARTUP_HOLD_SECONDS = float(
+    os.getenv("PLEX_RECOVERY_STARTUP_HOLD_SECONDS", "15")
+)
 PLEX_CLIENT_NAME = os.getenv("PLEX_CLIENT_NAME", "Emu")
 PLEX_CLIENT_URL = os.getenv("PLEX_CLIENT_URL", "").strip()
 PLEX_CLIENT_PROXY_THROUGH_SERVER = (
@@ -223,6 +226,20 @@ def _init_state_db() -> None:
             CREATE TABLE IF NOT EXISTS playback_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS random_play_history (
+                item_type TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (item_type, item_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS random_play_category_history (
+                category TEXT PRIMARY KEY,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -1114,74 +1131,130 @@ async def _resolve_play_item(plex: PlexServer, now_playing: dict, media_id: Opti
             item = random.choice(episodes)
         return item
 
-    active_movies = [
-        config
-        for config in CURATED_MOVIES
-        if _movie_config_is_random_eligible(config)
-    ]
-    if not active_movies:
-        raise HTTPException(
-            status_code=400,
-            detail="No curated movies available - set CURATED_MOVIES in .env",
-        )
+    raise HTTPException(status_code=400, detail="No media selected")
 
-    current_rating_key = str(now_playing["rating_key"])
-    choices = [
-        config
-        for config in active_movies
-        if str(config["rating_key"]) != current_rating_key
+
+def _random_item_id(item) -> str:
+    if isinstance(item, dict):
+        return str(item["rating_key"])
+    return str(item.ratingKey)
+
+
+def _least_played_choice(item_type: str, candidates: list, current_rating_key: Optional[str] = None):
+    """Choose randomly among the least-played candidates of one media type."""
+    filtered = [
+        item for item in candidates
+        if _random_item_id(item) != str(current_rating_key)
     ]
-    rating_key = int(random.choice(choices or active_movies)["rating_key"])
-    try:
-        return plex.fetchItem(rating_key)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=404, detail=f"Curated item {rating_key} not found: {exc}"
+    choices = filtered or candidates
+    if not choices:
+        return None
+
+    candidate_ids = [_random_item_id(item) for item in choices]
+    placeholders = ", ".join("?" for _ in candidate_ids)
+    with _db_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT item_id, play_count FROM random_play_history
+            WHERE item_type = ? AND item_id IN ({placeholders})
+            """,
+            (item_type, *candidate_ids),
+        ).fetchall()
+    counts = {row["item_id"]: row["play_count"] for row in rows}
+    lowest = min(counts.get(candidate_id, 0) for candidate_id in candidate_ids)
+    return random.choice([
+        item for item, candidate_id in zip(choices, candidate_ids)
+        if counts.get(candidate_id, 0) == lowest
+    ])
+
+
+def _least_played_category(categories: list[str]) -> str:
+    with _db_connection() as conn:
+        rows = conn.execute(
+            "SELECT category, play_count FROM random_play_category_history"
+        ).fetchall()
+    counts = {row["category"]: row["play_count"] for row in rows}
+    lowest = min(counts.get(category, 0) for category in categories)
+    return random.choice([
+        category for category in categories if counts.get(category, 0) == lowest
+    ])
+
+
+def _record_random_play(item, item_type: str, mixed_category: Optional[str] = None) -> None:
+    item_id = str(getattr(item, "ratingKey"))
+    now = _now_ts()
+    with _db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO random_play_history (item_type, item_id, play_count, updated_at)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(item_type, item_id) DO UPDATE SET
+                play_count = play_count + 1, updated_at = excluded.updated_at
+            """,
+            (item_type, item_id, now),
         )
+        if mixed_category:
+            conn.execute(
+                """
+                INSERT INTO random_play_category_history (category, play_count, updated_at)
+                VALUES (?, 1, ?)
+                ON CONFLICT(category) DO UPDATE SET
+                    play_count = play_count + 1, updated_at = excluded.updated_at
+                """,
+                (mixed_category, now),
+            )
+
+
+async def _random_show_episodes(plex: PlexServer) -> list:
+    episodes = []
+    for config in CURATED_SHOWS:
+        if config.get("random", True) is False:
+            continue
+        try:
+            show = plex.fetchItem(int(config["rating_key"]))
+            episodes.extend(_episode_pool_for_show(show))
+        except Exception:
+            logger.warning("Skipping unavailable curated show %s during random selection", config["rating_key"])
+    return episodes
+
+
+async def _resolve_random_movie(plex: PlexServer, now_playing: dict):
+    candidates = [config for config in CURATED_MOVIES if _movie_config_is_random_eligible(config)]
+    selected = _least_played_choice("movie", candidates, now_playing["rating_key"])
+    if selected is None:
+        raise HTTPException(status_code=400, detail="No curated movies available for random playback")
+    try:
+        return plex.fetchItem(int(selected["rating_key"])), "movie", None
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"Curated item {selected['rating_key']} not found: {exc}")
+
+
+async def _resolve_random_show(plex: PlexServer, now_playing: dict, mixed_category: Optional[str] = None):
+    episodes = await _random_show_episodes(plex)
+    selected = _least_played_choice("episode", episodes, now_playing["rating_key"])
+    if selected is None:
+        raise HTTPException(status_code=400, detail="No curated show episodes available for random playback")
+    return selected, "episode", mixed_category
 
 
 async def _resolve_random_movie_or_show(plex: PlexServer, now_playing: dict):
-    candidates: list[tuple[str, int]] = []
-    current_rating_key = str(now_playing["rating_key"])
-    for config in CURATED_MOVIES:
-        if _movie_config_is_random_eligible(config):
-            candidates.append(("movie", int(config["rating_key"])))
-    for config in CURATED_SHOWS:
-        candidates.append(("show", int(config["rating_key"])))
-
-    if not candidates:
-        raise HTTPException(
-            status_code=400,
-            detail="No curated movies or shows available for random playback",
-        )
-
-    filtered = [
-        candidate
-        for candidate in candidates
-        if str(candidate[1]) != current_rating_key
-    ]
-    media_type, rating_key = random.choice(filtered or candidates)
-    try:
-        item = plex.fetchItem(rating_key)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=404, detail=f"Curated item {rating_key} not found: {exc}"
-        )
-
-    if media_type == "show":
-        episodes = _episode_pool_for_show(item)
-        if not episodes:
-            raise HTTPException(
-                status_code=404, detail="No episodes found for that curated show"
-            )
-        return random.choice(episodes)
-    return item
+    movies = [config for config in CURATED_MOVIES if _movie_config_is_random_eligible(config)]
+    episodes = await _random_show_episodes(plex)
+    categories = (["movie"] if movies else []) + (["show"] if episodes else [])
+    if not categories:
+        raise HTTPException(status_code=400, detail="No curated movies or shows available for random playback")
+    category = _least_played_category(categories)
+    if category == "movie":
+        item, item_type, _ = await _resolve_random_movie(plex, now_playing)
+        return item, item_type, category
+    return await _resolve_random_show(plex, now_playing, mixed_category=category)
 
 
 async def _play_plex_media_once(
     media_id: Optional[int],
     startup_timeout: int = PLEX_CLIENT_STARTUP_TIMEOUT,
     random_movie_or_show: bool = False,
+    random_mode: Optional[str] = None,
     ensure_tv: bool = True,
 ) -> dict:
     """Ensure the TV and HTPC are ready, then select and play media."""
@@ -1194,8 +1267,16 @@ async def _play_plex_media_once(
 
     client = _plex_client(plex)
     now_playing = _plex_now_playing(plex)
+    random_selection = None
     if random_movie_or_show:
-        item = await _resolve_random_movie_or_show(plex, now_playing)
+        item, item_type, mixed_category = await _resolve_random_movie_or_show(plex, now_playing)
+        random_selection = (item, item_type, mixed_category)
+    elif random_mode == "show":
+        item, item_type, mixed_category = await _resolve_random_show(plex, now_playing)
+        random_selection = (item, item_type, mixed_category)
+    elif media_id is None:
+        item, item_type, mixed_category = await _resolve_random_movie(plex, now_playing)
+        random_selection = (item, item_type, mixed_category)
     else:
         item = await _resolve_play_item(plex, now_playing, media_id)
 
@@ -1219,6 +1300,9 @@ async def _play_plex_media_once(
             status_code=502,
             detail=f"Failed to send play command to Plex client '{PLEX_CLIENT_NAME}': {exc}",
         )
+
+    if random_selection:
+        _record_random_play(*random_selection)
 
     return {
         "status": "ok",
@@ -1250,6 +1334,7 @@ async def _recover_plex_and_retry_playback(
     media_id: Optional[int],
     startup_timeout: int,
     random_movie_or_show: bool,
+    random_mode: Optional[str] = None,
 ) -> dict:
     """Restart HTPC once, wait for it to register, then replay the request."""
     loop = asyncio.get_running_loop()
@@ -1262,6 +1347,9 @@ async def _recover_plex_and_retry_playback(
 
         _set_plex_recovery_state(True, "Waiting for Plex to reconnect")
         _ensure_plex_htpc_running()
+        _set_plex_recovery_state(True, "Plex is starting")
+        await asyncio.sleep(PLEX_RECOVERY_STARTUP_HOLD_SECONDS)
+        _set_plex_recovery_state(True, "Waiting for Plex to reconnect")
         plex = _plex_server()
         await _wait_for_plex_client(plex, startup_timeout)
 
@@ -1270,6 +1358,7 @@ async def _recover_plex_and_retry_playback(
             media_id,
             startup_timeout=startup_timeout,
             random_movie_or_show=random_movie_or_show,
+            random_mode=random_mode,
             ensure_tv=False,
         )
     finally:
@@ -1281,6 +1370,7 @@ async def _play_plex_media(
     media_id: Optional[int],
     startup_timeout: int = PLEX_CLIENT_STARTUP_TIMEOUT,
     random_movie_or_show: bool = False,
+    random_mode: Optional[str] = None,
     ensure_tv: bool = True,
 ) -> dict:
     """Play media, restarting an unreachable Plex HTPC once before retrying."""
@@ -1289,6 +1379,7 @@ async def _play_plex_media(
             media_id,
             startup_timeout=startup_timeout,
             random_movie_or_show=random_movie_or_show,
+            random_mode=random_mode,
             ensure_tv=ensure_tv,
         )
     except Exception as exc:
@@ -1299,12 +1390,21 @@ async def _play_plex_media(
             media_id,
             startup_timeout=startup_timeout,
             random_movie_or_show=random_movie_or_show,
+            random_mode=random_mode,
         )
 
 
-def _run_play_media_job(media_id: Optional[int], random_movie_or_show: bool = False) -> None:
+def _run_play_media_job(
+    media_id: Optional[int],
+    random_movie_or_show: bool = False,
+    random_mode: Optional[str] = None,
+) -> None:
     try:
-        asyncio.run(_play_plex_media(media_id, random_movie_or_show=random_movie_or_show))
+        asyncio.run(_play_plex_media(
+            media_id,
+            random_movie_or_show=random_movie_or_show,
+            random_mode=random_mode,
+        ))
     except Exception:
         logger.exception("Background Plex play command failed")
 
@@ -1955,12 +2055,20 @@ async def plex_play(
             "Omit → random active movie from CURATED_MOVIES."
         ),
     ),
+    random_mode: Optional[str] = Query(
+        None,
+        description="Use 'show' for a fair random episode from curated shows.",
+    ),
 ):
     """
     Queue playback work and return immediately so the dashboard stays responsive.
     """
+    if random_mode not in (None, "show"):
+        raise HTTPException(status_code=400, detail="random_mode must be 'show'")
+    if random_mode and media_id is not None:
+        raise HTTPException(status_code=400, detail="random_mode cannot be combined with media_id")
     loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, _run_play_media_job, media_id)
+    loop.run_in_executor(None, _run_play_media_job, media_id, False, random_mode)
     return {"status": "accepted", "action": "play"}
 
 

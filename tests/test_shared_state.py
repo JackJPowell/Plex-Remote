@@ -6,6 +6,13 @@ from unittest.mock import AsyncMock, Mock, patch
 import main
 
 
+class MediaItem:
+    def __init__(self, rating_key, title="Item", media_type="movie"):
+        self.ratingKey = rating_key
+        self.title = title
+        self.type = media_type
+
+
 class SharedStateTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -168,13 +175,121 @@ class SharedStateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"status": "ok"})
         self.assertEqual(play_once.await_count, 1)
-        recover.assert_awaited_once_with(404, startup_timeout=main.PLEX_CLIENT_STARTUP_TIMEOUT, random_movie_or_show=False)
+        recover.assert_awaited_once_with(404, startup_timeout=main.PLEX_CLIENT_STARTUP_TIMEOUT, random_movie_or_show=False, random_mode=None)
 
     async def test_recovery_state_is_returned_with_playback_state(self):
         main._set_plex_recovery_state(True, "Waiting for Plex to reconnect")
         state = main._playback_state(main._empty_now_playing())
 
         self.assertEqual(state["recovery"], {"active": True, "stage": "Waiting for Plex to reconnect"})
+
+    async def test_random_movie_rotates_among_least_played_eligible_items(self):
+        first = MediaItem(101, "First")
+        second = MediaItem(202, "Second")
+        plex = Mock(fetchItem=Mock(side_effect=lambda rating_key: {101: first, 202: second}[rating_key]))
+        configs = [{"rating_key": "101"}, {"rating_key": "202"}]
+
+        with patch.object(main, "CURATED_MOVIES", configs):
+            selected, item_type, category = await main._resolve_random_movie(plex, {"rating_key": None})
+            main._record_random_play(selected, item_type, category)
+            next_selected, _, _ = await main._resolve_random_movie(plex, {"rating_key": None})
+
+        self.assertIn(selected.ratingKey, {101, 202})
+        self.assertNotEqual(next_selected.ratingKey, selected.ratingKey)
+
+    async def test_random_movie_ignores_inactive_and_disabled_configurations(self):
+        available = MediaItem(101, "Available")
+        plex = Mock(fetchItem=Mock(return_value=available))
+        unavailable_month = (main.datetime.now().month % 12) + 1
+        configs = [
+            {"rating_key": "101"},
+            {"rating_key": "202", "months": [unavailable_month]},
+            {"rating_key": "303", "random": False},
+        ]
+
+        with patch.object(main, "CURATED_MOVIES", configs):
+            selected, _, _ = await main._resolve_random_movie(plex, {"rating_key": None})
+
+        self.assertEqual(selected.ratingKey, 101)
+        plex.fetchItem.assert_called_once_with(101)
+
+    async def test_random_show_rotates_episodes_without_tracking_manual_show_playback(self):
+        first = MediaItem(401, "Episode one", "episode")
+        second = MediaItem(402, "Episode two", "episode")
+        with patch("main._random_show_episodes", new=AsyncMock(return_value=[first, second])):
+            selected, item_type, category = await main._resolve_random_show(Mock(), {"rating_key": None})
+            main._record_random_play(selected, item_type, category)
+            next_selected, _, _ = await main._resolve_random_show(Mock(), {"rating_key": None})
+
+        self.assertIn(selected.ratingKey, {401, 402})
+        self.assertNotEqual(next_selected.ratingKey, selected.ratingKey)
+
+    async def test_manual_playback_does_not_increment_random_history(self):
+        item = MediaItem(404, "Manual movie")
+        idle = {"playing": False, "rating_key": None}
+        with patch("main._ensure_tv_on", new=AsyncMock(return_value=False)), \
+             patch("main._ensure_plex_htpc_running", return_value=False), \
+             patch("main._plex_server", return_value=object()), \
+             patch("main._plex_client", return_value=Mock()), \
+             patch("main._plex_now_playing", return_value=idle), \
+             patch("main._resolve_play_item", new=AsyncMock(return_value=item)), \
+             patch("main._send_play_command", new=AsyncMock(return_value=False)):
+            await main._play_plex_media_once(404)
+
+        with main._db_connection() as conn:
+            count = conn.execute("SELECT COUNT(*) AS count FROM random_play_history").fetchone()["count"]
+        self.assertEqual(count, 0)
+
+    async def test_random_play_is_recorded_once_after_successful_command(self):
+        item = MediaItem(505, "Random movie")
+        idle = {"playing": False, "rating_key": None}
+        with patch("main._ensure_tv_on", new=AsyncMock(return_value=False)), \
+             patch("main._ensure_plex_htpc_running", return_value=False), \
+             patch("main._plex_server", return_value=object()), \
+             patch("main._plex_client", return_value=Mock()), \
+             patch("main._plex_now_playing", return_value=idle), \
+             patch("main._resolve_random_movie", new=AsyncMock(return_value=(item, "movie", None))), \
+             patch("main._send_play_command", new=AsyncMock(return_value=False)):
+            await main._play_plex_media_once(None)
+
+        with main._db_connection() as conn:
+            row = conn.execute(
+                "SELECT play_count FROM random_play_history WHERE item_type = 'movie' AND item_id = '505'"
+            ).fetchone()
+        self.assertEqual(row["play_count"], 1)
+
+    def test_random_history_survives_curated_list_changes(self):
+        old_movie = MediaItem(601, "Old movie")
+        new_movie = MediaItem(602, "New movie")
+        main._record_random_play(old_movie, "movie")
+
+        selected = main._least_played_choice(
+            "movie",
+            [{"rating_key": "601"}, {"rating_key": "602"}],
+        )
+
+        self.assertEqual(selected["rating_key"], "602")
+
+    def test_mixed_rotation_balances_movie_and_show_categories(self):
+        main._record_random_play(MediaItem(701), "movie", mixed_category="movie")
+
+        category = main._least_played_category(["movie", "show"])
+
+        self.assertEqual(category, "show")
+
+    async def test_recovery_holds_overlay_while_plex_starts(self):
+        with patch("main._terminate_plex_htpc"), \
+             patch("main._close_plex_server"), \
+             patch("main._ensure_plex_htpc_running", return_value=True), \
+             patch("main._plex_server", return_value=object()), \
+             patch("main._wait_for_plex_client", new=AsyncMock()), \
+             patch("main._play_plex_media_once", new=AsyncMock(return_value={"status": "ok"})), \
+             patch("main.asyncio.sleep", new=AsyncMock()) as sleep:
+            result = await main._recover_plex_and_retry_playback(404, 10, False)
+
+        self.assertEqual(result, {"status": "ok"})
+        sleep.assert_any_await(2)
+        sleep.assert_any_await(main.PLEX_RECOVERY_STARTUP_HOLD_SECONDS)
 
 
 if __name__ == "__main__":

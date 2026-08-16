@@ -435,17 +435,10 @@ function usePlexRemote() {
       holdStatus({ plex_htpc_running: true });
       holdNowPlaying({ playing: true, state: "starting", display_title: "Starting movie..." });
     }),
-    randomShow: (shows) => {
-      const choices = shows.filter((item) => !item.unavailable);
-      const item = choices[Math.floor(Math.random() * choices.length)];
-      if (item) {
-        return command(`media-${item.rating_key}`, `/plex/play?media_id=${item.rating_key}`, ({ holdNowPlaying, holdStatus }) => {
-          holdStatus({ plex_htpc_running: true });
-          holdNowPlaying({ playing: true, state: "starting", display_title: `${item.title}: random episode`, artwork_url: item.artwork_url });
-        });
-      }
-      return undefined;
-    },
+    randomShow: () => command("random-show", "/plex/play?random_mode=show", ({ holdNowPlaying, holdStatus }) => {
+      holdStatus({ plex_htpc_running: true });
+      holdNowPlaying({ playing: true, state: "starting", display_title: "Starting random TV..." });
+    }),
     requestHelp: () => command("request-help", "/home-assistant/help"),
     playMedia: (item) => command(`media-${item.rating_key}`, `/plex/play?media_id=${item.rating_key}`, ({ holdNowPlaying, holdStatus }) => {
       holdStatus({ plex_htpc_running: true });
@@ -903,7 +896,7 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
           <RefreshCw size={22} />
           <span>Random Movie</span>
         </button>
-        <button className="choice random" type="button" onClick={() => actions.randomShow(shows)} disabled={pending.has("random-show") || shows.filter((item) => !item.unavailable).length === 0}>
+        <button className="choice random" type="button" onClick={actions.randomShow} disabled={pending.has("random-show") || shows.filter((item) => !item.unavailable).length === 0}>
           <RefreshCw size={22} />
           <span>Random TV</span>
         </button>
