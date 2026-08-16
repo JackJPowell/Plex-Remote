@@ -47,6 +47,7 @@ const EMPTY_PLAYBACK_STATE = {
   queue: [],
   timer: { active: false, expires_at: null, remaining_seconds: 0 },
   active_messages: [],
+  recovery: { active: false, stage: null },
   now_playing: null
 };
 
@@ -293,6 +294,7 @@ function usePlexRemote() {
       ...EMPTY_PLAYBACK_STATE,
       ...data,
       timer: { ...EMPTY_PLAYBACK_STATE.timer, ...(data.timer || {}) },
+      recovery: { ...EMPTY_PLAYBACK_STATE.recovery, ...(data.recovery || {}) },
       queue,
       active_messages: activeMessages
     });
@@ -1289,12 +1291,28 @@ function LogsView() {
   );
 }
 
+function PlexRecoveryOverlay({ recovery }) {
+  if (!recovery?.active) return null;
+  return (
+    <div className="plex-recovery-overlay" role="alertdialog" aria-modal="true" aria-label="Plex is restarting">
+      <div className="plex-recovery-card">
+        <RefreshCw className="recovery-spinner" size={34} aria-hidden="true" />
+        <h1>Plex is restarting</h1>
+        <p>{recovery.stage || "Restoring playback"}</p>
+        <small>Please wait. Your selected media will start automatically.</small>
+      </div>
+    </div>
+  );
+}
+
 function RemoteApp({ route }) {
   const remote = usePlexRemote();
-  if (route === "echo") return <EchoView {...remote} />;
-  if (route === "settings") return <SettingsView {...remote} />;
-  if (route === "messages") return <MessagesView {...remote} />;
-  return <HomeView {...remote} />;
+  let view;
+  if (route === "echo") view = <EchoView {...remote} />;
+  else if (route === "settings") view = <SettingsView {...remote} />;
+  else if (route === "messages") view = <MessagesView {...remote} />;
+  else view = <HomeView {...remote} />;
+  return <>{view}<PlexRecoveryOverlay recovery={remote.playbackState.recovery} /></>;
 }
 
 function App() {

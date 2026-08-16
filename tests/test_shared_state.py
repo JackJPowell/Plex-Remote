@@ -157,6 +157,25 @@ class SharedStateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["percent"], 25)
         self.assertEqual(result["offset"], 1800000)
 
+    async def test_playback_recovers_once_from_plex_connectivity_failure(self):
+        failed = main.HTTPException(
+            status_code=502,
+            detail="Failed to send play command: HTTPConnectionPool timed out",
+        )
+        with patch("main._play_plex_media_once", new=AsyncMock(side_effect=[failed, {"status": "ok"}])) as play_once, \
+             patch("main._recover_plex_and_retry_playback", new=AsyncMock(return_value={"status": "ok"})) as recover:
+            result = await main._play_plex_media(404)
+
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(play_once.await_count, 1)
+        recover.assert_awaited_once_with(404, startup_timeout=main.PLEX_CLIENT_STARTUP_TIMEOUT, random_movie_or_show=False)
+
+    async def test_recovery_state_is_returned_with_playback_state(self):
+        main._set_plex_recovery_state(True, "Waiting for Plex to reconnect")
+        state = main._playback_state(main._empty_now_playing())
+
+        self.assertEqual(state["recovery"], {"active": True, "stage": "Waiting for Plex to reconnect"})
+
 
 if __name__ == "__main__":
     unittest.main()

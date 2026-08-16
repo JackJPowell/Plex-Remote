@@ -254,7 +254,9 @@ button {
 .progress-track::-webkit-slider-runnable-track {
   height: 9px;
   border-radius: 999px;
-  background: linear-gradient(to right, var(--accent) 0 var(--progress), #33363b var(--progress) 100%);
+  background: linear-gradient(to right, #fff3ca 0, #f7bd35 18%, #ffe49a 42%, #d98700 70%, #f3a20a 100%) 0 / var(--progress) 100% no-repeat,
+    linear-gradient(to bottom, #454a50, #1f2328);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.35), inset 0 -1px 1px rgba(0, 0, 0, 0.45);
 }
 
 .progress-track::-webkit-slider-thumb {
@@ -262,9 +264,10 @@ button {
   height: 18px;
   margin-top: -4.5px;
   appearance: none;
-  border: 0;
+  border: 1px solid #ffe9aa;
   border-radius: 50%;
-  background: var(--accent);
+  background: radial-gradient(circle at 32% 26%, #fff7dc 0 8%, #ffd66a 26%, #d88400 62%, #ffbe24 100%);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.72), inset 0 1px 1px rgba(255, 255, 255, 0.85);
 }
 
 .progress-track::-moz-range-track {
@@ -276,15 +279,16 @@ button {
 .progress-track::-moz-range-progress {
   height: 9px;
   border-radius: 999px;
-  background: var(--accent);
+  background: linear-gradient(to right, #fff3ca, #f7bd35 18%, #ffe49a 42%, #d98700 70%, #f3a20a);
 }
 
 .progress-track::-moz-range-thumb {
   width: 18px;
   height: 18px;
-  border: 0;
+  border: 1px solid #ffe9aa;
   border-radius: 50%;
-  background: var(--accent);
+  background: radial-gradient(circle at 32% 26%, #fff7dc 0 8%, #ffd66a 26%, #d88400 62%, #ffbe24 100%);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.72), inset 0 1px 1px rgba(255, 255, 255, 0.85);
 }
 
 .rotating-pane {
@@ -606,6 +610,52 @@ button {
   inset: 0;
   z-index: 30;
   background: rgba(0, 0, 0, 0.58);
+}
+
+.plex-recovery-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.78);
+}
+
+.plex-recovery-card {
+  width: min(420px, 100%);
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  text-align: center;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.56);
+}
+
+.plex-recovery-card h1 {
+  margin: 14px 0 8px;
+  font-size: 1.45rem;
+}
+
+.plex-recovery-card p {
+  margin: 0;
+  color: var(--accent-2);
+  font-weight: 700;
+}
+
+.plex-recovery-card small {
+  display: block;
+  margin-top: 14px;
+  color: var(--muted);
+}
+
+.recovery-spinner {
+  color: var(--accent);
+  animation: recovery-spin 1.1s linear infinite;
+}
+
+@keyframes recovery-spin {
+  to { transform: rotate(360deg); }
 }
 
 .choice-modal {

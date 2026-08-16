@@ -97,6 +97,7 @@ _automation_task: Optional[asyncio.Task] = None
 _automation_lock: Optional[asyncio.Lock] = None
 _plex_server_instance: Optional[PlexServer] = None
 _plex_server_lock = threading.Lock()
+_plex_recovery_lock = threading.Lock()
 _home_assistant_monitor = HomeAssistantStateMonitor(
     HOME_ASSISTANT_URL,
     HOME_ASSISTANT_ACCESS_TOKEN,
@@ -427,8 +428,29 @@ def _playback_state(now_playing: Optional[dict] = None) -> dict:
             "queue": _queue_items(conn),
             "timer": _timer_state(conn),
             "active_messages": _active_messages(conn),
+            "recovery": _plex_recovery_state(conn),
             "now_playing": now_playing,
         }
+
+
+def _plex_recovery_state(conn: Optional[sqlite3.Connection] = None) -> dict:
+    owns_conn = conn is None
+    conn = conn or _db()
+    try:
+        active = _get_setting(conn, "plex_recovery_active") == "1"
+        return {
+            "active": active,
+            "stage": _get_setting(conn, "plex_recovery_stage") if active else None,
+        }
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def _set_plex_recovery_state(active: bool, stage: Optional[str] = None) -> None:
+    with _db_connection() as conn:
+        _set_setting(conn, "plex_recovery_active", "1" if active else None)
+        _set_setting(conn, "plex_recovery_stage", stage if active else None)
 
 
 def _next_queue_item() -> Optional[dict]:
@@ -1051,6 +1073,21 @@ def _ensure_plex_htpc_running() -> bool:
     return True
 
 
+def _terminate_plex_htpc() -> None:
+    """Immediately terminate Plex HTPC and stop its user service."""
+    subprocess.run(
+        "pkill -9 -f 'plex-bin'",
+        shell=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        "systemctl --user stop plex-htpc",
+        shell=True,
+        capture_output=True,
+        env=_SYSTEMD_USER_ENV,
+    )
+
+
 async def _resolve_play_item(plex: PlexServer, now_playing: dict, media_id: Optional[int]):
     """Resolve the requested media item, matching /plex/play selection rules."""
     if media_id is not None:
@@ -1141,7 +1178,7 @@ async def _resolve_random_movie_or_show(plex: PlexServer, now_playing: dict):
     return item
 
 
-async def _play_plex_media(
+async def _play_plex_media_once(
     media_id: Optional[int],
     startup_timeout: int = PLEX_CLIENT_STARTUP_TIMEOUT,
     random_movie_or_show: bool = False,
@@ -1193,6 +1230,76 @@ async def _play_plex_media(
         "plex_started": started,
         "command_timed_out": command_timed_out,
     }
+
+
+def _is_plex_connectivity_error(exc: Exception) -> bool:
+    """Identify failures for which restarting the HTPC is a safe recovery."""
+    message = str(exc).lower()
+    return any(marker in message for marker in (
+        "httpconnectionpool",
+        "max retries exceeded",
+        "connecttimeout",
+        "connection to ",
+        "connection refused",
+        "plex client '",
+        "timed out waiting for plex client",
+    ))
+
+
+async def _recover_plex_and_retry_playback(
+    media_id: Optional[int],
+    startup_timeout: int,
+    random_movie_or_show: bool,
+) -> dict:
+    """Restart HTPC once, wait for it to register, then replay the request."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _plex_recovery_lock.acquire)
+    try:
+        _set_plex_recovery_state(True, "Restarting Plex HTPC")
+        await loop.run_in_executor(None, _terminate_plex_htpc)
+        _close_plex_server()
+        await asyncio.sleep(2)
+
+        _set_plex_recovery_state(True, "Waiting for Plex to reconnect")
+        _ensure_plex_htpc_running()
+        plex = _plex_server()
+        await _wait_for_plex_client(plex, startup_timeout)
+
+        _set_plex_recovery_state(True, "Starting your selection")
+        return await _play_plex_media_once(
+            media_id,
+            startup_timeout=startup_timeout,
+            random_movie_or_show=random_movie_or_show,
+            ensure_tv=False,
+        )
+    finally:
+        _set_plex_recovery_state(False)
+        _plex_recovery_lock.release()
+
+
+async def _play_plex_media(
+    media_id: Optional[int],
+    startup_timeout: int = PLEX_CLIENT_STARTUP_TIMEOUT,
+    random_movie_or_show: bool = False,
+    ensure_tv: bool = True,
+) -> dict:
+    """Play media, restarting an unreachable Plex HTPC once before retrying."""
+    try:
+        return await _play_plex_media_once(
+            media_id,
+            startup_timeout=startup_timeout,
+            random_movie_or_show=random_movie_or_show,
+            ensure_tv=ensure_tv,
+        )
+    except Exception as exc:
+        if not _is_plex_connectivity_error(exc):
+            raise
+        logger.warning("Plex connectivity failed; restarting HTPC before retrying: %s", exc)
+        return await _recover_plex_and_retry_playback(
+            media_id,
+            startup_timeout=startup_timeout,
+            random_movie_or_show=random_movie_or_show,
+        )
 
 
 def _run_play_media_job(media_id: Optional[int], random_movie_or_show: bool = False) -> None:
@@ -1448,6 +1555,7 @@ async def spa_page():
 async def app_startup() -> None:
     global _automation_task, _automation_lock
     _init_state_db()
+    _set_plex_recovery_state(False)
     _automation_lock = asyncio.Lock()
     _automation_task = asyncio.create_task(_automation_loop())
     _home_assistant_monitor.start()
@@ -1470,10 +1578,15 @@ async def app_shutdown() -> None:
 
 @app.get("/playback/state", summary="Queue, timer, messages, and now-playing state")
 async def playback_state():
-    now_playing = await asyncio.get_running_loop().run_in_executor(
-        None,
-        lambda: _plex_now_playing(_plex_server()),
-    )
+    try:
+        now_playing = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: _plex_now_playing(_plex_server()),
+        )
+    except Exception:
+        # A recovery can temporarily make Plex unavailable. Still return state
+        # so connected dashboards can display the restart overlay.
+        now_playing = _empty_now_playing()
     return _playback_state(now_playing)
 
 
@@ -2024,17 +2137,7 @@ async def plex_start():
 
 @app.post("/plex/terminate", summary="Stop Plex HTPC")
 async def plex_terminate():
-    subprocess.run(
-        "pkill -9 -f 'plex-bin'",
-        shell=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        "systemctl --user stop plex-htpc",
-        shell=True,
-        capture_output=True,
-        env=_SYSTEMD_USER_ENV,
-    )
+    _terminate_plex_htpc()
     return {"status": "ok", "action": "stop"}
 
 
