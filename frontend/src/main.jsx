@@ -9,6 +9,7 @@ import {
   ChevronUp,
   Clapperboard,
   Clock,
+  CircleHelp,
   Edit2,
   Home,
   List,
@@ -443,6 +444,7 @@ function usePlexRemote() {
       }
       return undefined;
     },
+    requestHelp: () => command("request-help", "/home-assistant/help"),
     playMedia: (item) => command(`media-${item.rating_key}`, `/plex/play?media_id=${item.rating_key}`, ({ holdNowPlaying, holdStatus }) => {
       holdStatus({ plex_htpc_running: true });
       holdNowPlaying({ playing: true, state: "starting", display_title: item.type === "show" ? `${item.title}: random episode` : item.title, artwork_url: item.artwork_url });
@@ -650,7 +652,9 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
   const [loading, setLoading] = useState(false);
   const [browserError, setBrowserError] = useState(null);
   const [choiceItem, setChoiceItem] = useState(null);
+  const [helpRequested, setHelpRequested] = useState(false);
   const idleTimer = useRef(null);
+  const helpResetTimer = useRef(null);
   const navigationId = useRef(0);
   const playbackActive = Boolean(nowPlaying?.playing || nowPlaying?.state);
   const title = mode === "movies"
@@ -672,6 +676,15 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
     setBrowserError(null);
     setChoiceItem(null);
   }, []);
+
+  useEffect(() => () => window.clearTimeout(helpResetTimer.current), []);
+
+  const requestHelp = () => {
+    setHelpRequested(true);
+    window.clearTimeout(helpResetTimer.current);
+    helpResetTimer.current = window.setTimeout(() => setHelpRequested(false), 10000);
+    actions.requestHelp();
+  };
 
   const resetIdleTimer = useCallback(() => {
     window.clearTimeout(idleTimer.current);
@@ -857,6 +870,10 @@ function MediaBrowser({ movies, shows, actions, pending, nowPlaying, echo = fals
           <span>Random TV</span>
         </button>
       </div>
+      <button className="choice help" type="button" onClick={requestHelp} disabled={pending.has("request-help")}>
+        {helpRequested ? <Check size={23} /> : <CircleHelp size={23} />}
+        <span>{helpRequested ? "Jack has been notified" : "Something not right? Click here"}</span>
+      </button>
     </section>
   );
 

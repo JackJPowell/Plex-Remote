@@ -340,7 +340,7 @@ button {
 
 .browser.top {
   display: grid;
-  grid-template-rows: minmax(0, 4fr) minmax(74px, 1fr);
+  grid-template-rows: minmax(0, 4fr) minmax(74px, 1fr) auto;
   gap: 12px;
 }
 
@@ -380,6 +380,14 @@ button {
   background: var(--accent);
   color: #151515;
   border-color: var(--accent);
+}
+
+.choice.help {
+  min-height: 64px;
+  background: var(--bad);
+  border-color: var(--bad);
+  color: #fff;
+  font-size: 1.05rem;
 }
 
 .browser-head {
@@ -668,7 +676,7 @@ button {
   grid-template-columns: 46px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  min-height: 64px;
+  min-height: 82px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel-2);
@@ -677,7 +685,7 @@ button {
 
 .queue-item img {
   width: 46px;
-  height: 64px;
+  height: 82px;
   object-fit: cover;
 }
 
@@ -754,12 +762,12 @@ button {
 }
 
 .browser.echo.top {
-  grid-template-rows: minmax(0, 4fr) minmax(64px, 1fr);
+  grid-template-rows: minmax(0, 4fr) minmax(64px, 1fr) auto;
   gap: 10px;
 }
 
 .browser.echo .choice {
-  min-height: 0;
+  min-height: 44px;
 }
 
 .browser.echo .media-list {
@@ -1133,7 +1141,7 @@ button {
   }
 
   .browser.echo.top {
-    grid-template-rows: minmax(168px, 4fr) minmax(64px, 1fr);
+    grid-template-rows: minmax(168px, 4fr) minmax(64px, 1fr) auto;
   }
 }
 
@@ -1197,7 +1205,7 @@ button {
   }
 
   .browser.top {
-    grid-template-rows: minmax(168px, 4fr) minmax(64px, 1fr);
+    grid-template-rows: minmax(168px, 4fr) minmax(64px, 1fr) auto;
     min-height: 0;
   }
 

@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from plexapi.server import PlexServer
 
-from home_assistant import HomeAssistantStateMonitor
+from home_assistant import HomeAssistantNotifier, HomeAssistantStateMonitor
 
 load_dotenv()
 logger = logging.getLogger("plex-remote")
@@ -69,6 +69,10 @@ AUTOMATION_POLL_INTERVAL = float(os.getenv("AUTOMATION_POLL_INTERVAL", "4"))
 AUTOMATION_IDLE_GRACE_SECONDS = float(os.getenv("AUTOMATION_IDLE_GRACE_SECONDS", "6"))
 HOME_ASSISTANT_URL = os.getenv("HOME_ASSISTANT_URL", "").strip()
 HOME_ASSISTANT_ACCESS_TOKEN = os.getenv("HOME_ASSISTANT_ACCESS_TOKEN", "").strip()
+HOME_ASSISTANT_NOTIFY_ENTITY = os.getenv(
+    "HOME_ASSISTANT_NOTIFY_ENTITY",
+    os.getenv("HOME_ASSISTANT_NOTIFY_SERVICE", "notify.iphone_jack"),
+).strip()
 
 # Shared lock file — ensures only one cec-client process runs at a time.
 # status.sh also acquires this lock before calling cec-client.
@@ -96,6 +100,11 @@ _plex_server_lock = threading.Lock()
 _home_assistant_monitor = HomeAssistantStateMonitor(
     HOME_ASSISTANT_URL,
     HOME_ASSISTANT_ACCESS_TOKEN,
+)
+_home_assistant_notifier = HomeAssistantNotifier(
+    HOME_ASSISTANT_URL,
+    HOME_ASSISTANT_ACCESS_TOKEN,
+    HOME_ASSISTANT_NOTIFY_ENTITY,
 )
 
 # D-Bus / XDG environment required for `systemctl --user` in subprocesses.
@@ -1304,6 +1313,19 @@ async def home_assistant_occupancy() -> dict:
     return _home_assistant_monitor.snapshot()
 
 
+@app.post("/home-assistant/help", summary="Send a Home Assistant help notification")
+async def home_assistant_help() -> dict:
+    """Notify through Home Assistant when dashboard assistance is requested."""
+    try:
+        await _home_assistant_notifier.notify_help_requested()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ConnectionError as exc:
+        logger.warning("Could not send Home Assistant help notification: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"status": "ok", "action": "help_notification_sent"}
+
+
 @app.get("/api/logs", summary="Query persisted error logs")
 async def get_error_logs(
     start: Optional[str] = Query(None),
@@ -1376,7 +1398,13 @@ async def create_client_error_log(entry: ClientLogWrite):
 
 def _spa_response():
     if os.path.exists(FRONTEND_INDEX):
-        return FileResponse(FRONTEND_INDEX)
+        # The HTML file points at hashed frontend assets. Never cache the HTML
+        # itself so embedded browsers (notably Fully Kiosk) discover a newly
+        # built asset bundle after a reload while retaining normal asset caching.
+        return FileResponse(
+            FRONTEND_INDEX,
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
     return HTMLResponse(
         """
         <!doctype html>

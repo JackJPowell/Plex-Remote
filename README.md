@@ -20,12 +20,17 @@ Add the Home Assistant address and a long-lived access token to `.env`:
 touch .env && chmod 600 .env
 printf '%s\n' 'HOME_ASSISTANT_URL=http://homeassistant.local:8123' >> .env
 read -rsp 'Home Assistant token: ' HA_TOKEN && printf '\nHOME_ASSISTANT_ACCESS_TOKEN=%s\n' "$HA_TOKEN" >> .env && unset HA_TOKEN
+printf '%s\n' 'HOME_ASSISTANT_NOTIFY_ENTITY=notify.iphone_jack' >> .env
 ```
 
 Restart the API after setting these values. The server authenticates to Home
 Assistant over `/api/websocket`, caches the chair and bed binary sensors, and
 automatically reconnects after a disconnect. Only those two entities are
 included in the ongoing state-change subscription.
+
+The help button sends a mobile notification through
+`HOME_ASSISTANT_NOTIFY_ENTITY`. Set this to the Home Assistant notify entity
+for the intended device, such as `notify.iphone_jack`.
 
 ## Frontend
 

@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse, urlunparse
@@ -30,6 +32,70 @@ def websocket_url(base_url: str) -> str:
     if not path.endswith("/api/websocket"):
         path = f"{path}/api/websocket"
     return urlunparse(parsed._replace(scheme=scheme, path=path))
+
+
+def api_url(base_url: str, path: str) -> str:
+    """Build a Home Assistant REST API URL from its configured base URL."""
+    value = base_url.strip().rstrip("/")
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"http://{value}"
+    parsed = urlparse(value)
+    scheme = {"ws": "http", "wss": "https"}.get(parsed.scheme, parsed.scheme)
+    base_path = parsed.path.rstrip("/")
+    return urlunparse(parsed._replace(scheme=scheme, path=f"{base_path}{path}"))
+
+
+class HomeAssistantNotifier:
+    """Send mobile notifications through Home Assistant's REST API."""
+
+    def __init__(self, base_url: str, access_token: str, notify_entity_id: str) -> None:
+        self.url = api_url(base_url, "/api/services/notify/send_message")
+        self.access_token = access_token.strip()
+        self.notify_entity_id = notify_entity_id.strip()
+
+    @property
+    def configured(self) -> bool:
+        return bool(
+            self.url
+            and self.access_token
+            and self.notify_entity_id.startswith("notify.")
+        )
+
+    async def notify_help_requested(self) -> None:
+        """Send the dashboard help request to the configured mobile device."""
+        if not self.configured:
+            raise RuntimeError("Home Assistant notifications are not configured")
+        payload = json.dumps({
+            "entity_id": self.notify_entity_id,
+            "title": "Plex Remote: Help requested",
+            "message": "Someone pressed the help button on the Plex Remote dashboard.",
+        }).encode("utf-8")
+        await asyncio.to_thread(self._send, payload)
+
+    def _send(self, payload: bytes) -> None:
+        request = Request(
+            self.url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                if not 200 <= response.status < 300:
+                    raise ConnectionError(
+                        f"Home Assistant notification failed with HTTP {response.status}"
+                    )
+        except HTTPError as exc:
+            raise ConnectionError(
+                f"Home Assistant notification failed with HTTP {exc.code}"
+            ) from exc
+        except URLError as exc:
+            raise ConnectionError("Could not reach Home Assistant for notification") from exc
 
 
 class HomeAssistantStateMonitor:

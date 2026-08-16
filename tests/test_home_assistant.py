@@ -1,11 +1,12 @@
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from home_assistant import (
     BED_ENTITY_ID,
     CHAIR_ENTITY_ID,
     ENTITY_IDS,
+    HomeAssistantNotifier,
     HomeAssistantStateMonitor,
     websocket_url,
 )
@@ -118,6 +119,26 @@ class HomeAssistantStateMonitorTest(unittest.IsolatedAsyncioTestCase):
             await monitor._authenticate(socket)
 
         self.assertNotIn("very-secret", str(error.exception))
+
+
+class HomeAssistantNotifierTest(unittest.IsolatedAsyncioTestCase):
+    async def test_sends_help_notification_to_configured_mobile_entity(self):
+        notifier = HomeAssistantNotifier("https://ha.example.com", "secret", "notify.iphone_jack")
+        response = Mock(status=200)
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=None)
+
+        with patch("home_assistant.urlopen", return_value=response) as urlopen:
+            await notifier.notify_help_requested()
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://ha.example.com/api/services/notify/send_message")
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret")
+        self.assertEqual(json.loads(request.data), {
+            "entity_id": "notify.iphone_jack",
+            "title": "Plex Remote: Help requested",
+            "message": "Someone pressed the help button on the Plex Remote dashboard.",
+        })
 
 
 if __name__ == "__main__":
