@@ -10,6 +10,9 @@
   --accent-2: #f0b437;
   --good: #57c278;
   --bad: #ef6461;
+  --panel-surface: linear-gradient(145deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0) 34%), linear-gradient(180deg, #24272b, #1a1c1f);
+  --control-surface: linear-gradient(145deg, #2e3237, #202328 62%, #1b1d20);
+  --edge-highlight: rgba(255, 255, 255, 0.09);
 }
 
 * {
@@ -18,7 +21,11 @@
 
 body {
   margin: 0;
-  background: var(--bg);
+  background:
+    radial-gradient(ellipse 75% 44% at 50% -12%, rgba(229, 160, 13, 0.13), transparent 68%),
+    radial-gradient(ellipse 44% 30% at 8% 92%, rgba(255, 255, 255, 0.035), transparent 72%),
+    repeating-linear-gradient(125deg, rgba(255, 255, 255, 0.012) 0 1px, transparent 1px 5px),
+    var(--bg);
   color: var(--text);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -74,9 +81,10 @@ button {
 .now-panel,
 .browser,
 .settings-panel {
-  background: var(--panel);
+  background: var(--panel-surface);
   border: 1px solid var(--line);
   border-radius: 8px;
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 14px 32px rgba(0, 0, 0, 0.2);
 }
 
 .now-panel {
@@ -105,20 +113,25 @@ button {
   height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel-2);
+  background: var(--control-surface);
   color: var(--text);
   cursor: pointer;
   text-decoration: none;
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 2px 4px rgba(0, 0, 0, 0.25);
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 
 .icon-button:hover {
   border-color: #555a61;
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.13), 0 6px 12px rgba(0, 0, 0, 0.32);
 }
 
 .icon-button.active {
-  background: var(--accent);
+  background: linear-gradient(to bottom, #edae28, #dc9405);
   border-color: var(--accent);
   color: #151515;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55), 0 4px 12px rgba(229, 160, 13, 0.2);
 }
 
 .icon-button.occupancy-status {
@@ -195,8 +208,9 @@ button {
   aspect-ratio: 2 / 3;
   object-fit: cover;
   border-radius: 8px;
-  border: 1px solid transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
   background: #17191c;
+  box-shadow: 0 14px 26px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .poster.empty {
@@ -350,9 +364,10 @@ button {
   height: 34px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel-2);
+  background: var(--control-surface);
   color: var(--text);
   cursor: pointer;
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 2px 4px rgba(0, 0, 0, 0.25);
 }
 
 .timer-controls button:disabled,
@@ -403,10 +418,18 @@ button {
   gap: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel-2);
+  background: var(--control-surface);
   color: var(--text);
   cursor: pointer;
   font-weight: 780;
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 4px 10px rgba(0, 0, 0, 0.22);
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.choice:not(:disabled):hover {
+  border-color: #5a5f66;
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 8px 16px rgba(0, 0, 0, 0.3);
 }
 
 .choice.large {
@@ -414,14 +437,15 @@ button {
 }
 
 .choice.random {
-  background: var(--accent);
+  background: linear-gradient(to bottom, #edae28, #dc9405);
   color: #151515;
   border-color: var(--accent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.52), 0 5px 14px rgba(229, 160, 13, 0.2);
 }
 
 .choice.help {
   min-height: 64px;
-  background: var(--bad);
+  background: linear-gradient(to bottom, #f47772, #dc514f);
   border-color: var(--bad);
   color: #fff;
   font-size: 1.05rem;
@@ -454,11 +478,19 @@ button {
   min-height: 62px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel-2);
+  background: var(--control-surface);
   color: var(--text);
   text-align: left;
   cursor: pointer;
   padding: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055), 0 2px 5px rgba(0, 0, 0, 0.16);
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.media-row:not(:disabled):hover {
+  border-color: #51565d;
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 7px 14px rgba(0, 0, 0, 0.22);
 }
 
 .media-row.split {
@@ -554,7 +586,8 @@ button {
   min-height: 52px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel);
+  background: var(--panel-surface);
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .pill {
@@ -705,16 +738,17 @@ button {
   min-height: 40px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel-2);
+  background: var(--control-surface);
   color: var(--text);
   padding: 0 12px;
   cursor: pointer;
   font-weight: 760;
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 2px 5px rgba(0, 0, 0, 0.22);
 }
 
 .modal-actions button:first-child,
 .form-actions button:first-child {
-  background: var(--accent);
+  background: linear-gradient(to bottom, #edae28, #dc9405);
   border-color: var(--accent);
   color: #151515;
 }
@@ -729,7 +763,7 @@ button {
   width: min(430px, 100vw);
   height: 100%;
   border-left: 1px solid var(--line);
-  background: var(--panel);
+  background: var(--panel-surface);
   padding: 14px;
   box-shadow: -20px 0 60px rgba(0, 0, 0, 0.45);
 }
@@ -762,7 +796,7 @@ button {
   min-height: 82px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel-2);
+  background: var(--control-surface);
   overflow: hidden;
 }
 
@@ -862,7 +896,7 @@ button {
 }
 
 .settings-page {
-  background: #151515;
+  background: transparent;
 }
 
 .settings-panel {
@@ -926,8 +960,9 @@ button {
 .messages-list-panel {
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel);
+  background: var(--panel-surface);
   padding: 16px;
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 14px 32px rgba(0, 0, 0, 0.2);
 }
 
 .message-form h1 {
@@ -989,7 +1024,7 @@ button {
   align-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel-2);
+  background: var(--control-surface);
   padding: 12px;
 }
 
@@ -1027,7 +1062,8 @@ button {
   padding: 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel);
+  background: var(--panel-surface);
+  box-shadow: inset 0 1px 0 var(--edge-highlight), 0 14px 32px rgba(0, 0, 0, 0.2);
 }
 
 .logs-heading {
@@ -1114,7 +1150,7 @@ button {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel-2);
+  background: var(--control-surface);
 }
 
 .log-entry-head {
